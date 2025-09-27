@@ -1,0 +1,80 @@
+---
+title: "Data Cleaning"
+author: "Will Hoover"
+date: "2025-09-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library("hoopR")
+library("dplyr")
+library(tictoc)
+library(devtools)
+library(pacman)
+library(ranger)
+```
+
+
+
+```{r}
+shots_2025 = shots_2025 %>% mutate(TEAM_NAME = case_when(
+  TEAM_NAME == "New York Knicks" ~ "NYK",
+  TEAM_NAME == "Houston Rockets" ~ "HOU",
+  TEAM_NAME == "Miami Heat" ~ "MIA",
+  TEAM_NAME == "Toronto Raptors" ~ "TOR",
+  TEAM_NAME == "Memphis Grizzlies" ~ "MEM",
+  TEAM_NAME == "Denver Nuggets" ~ "DEN",
+  TEAM_NAME == "Minnesota Timberwolves" ~ "MIN",
+  TEAM_NAME == "Phoenix Suns" ~ "PHX",
+  TEAM_NAME == "Cleveland Cavaliers" ~ "CLE",
+  TEAM_NAME == "New Orleans Pelicans" ~ "NOP",
+  TEAM_NAME == "Golden State Warriors" ~ "GSW",
+  TEAM_NAME == "Milwaukee Bucks" ~ "MIL",
+  TEAM_NAME == "Orlando Magic" ~ "ORL",
+  TEAM_NAME == "Portland Trail Blazers" ~ "POR",
+  TEAM_NAME == "Washington Wizards" ~ "WAS",
+  TEAM_NAME == "LA Clippers" ~ "LAC",
+  TEAM_NAME == "Charlotte Hornets" ~ "CHA",
+  TEAM_NAME == "Chicago Bulls" ~ "CHI",
+  TEAM_NAME == "Atlanta Hawks" ~ "ATL",
+  TEAM_NAME == "San Antonio Spurs" ~ "SAS",
+  TEAM_NAME == "Brooklyn Nets" ~ "BKN",
+  TEAM_NAME == "Philadelphia 76ers" ~ "PHI",
+  TEAM_NAME == "Indiana Pacers" ~ "IND",
+  TEAM_NAME == "Boston Celtics" ~ "BOS",
+  TEAM_NAME == "Dallas Mavericks" ~ "DAL",
+  TEAM_NAME == "Sacramento Kings" ~ "SAC",
+  TEAM_NAME == "Oklahoma City Thunder" ~ "OKC",
+  TEAM_NAME == "Los Angeles Lakers" ~ "LAL",
+  TEAM_NAME == "Utah Jazz" ~ "UTA",
+  TEAM_NAME == "Detroit Pistons" ~ "DET"
+)) 
+shots_2025
+```
+
+```{r}
+cols_num = c("GAME_ID", "GAME_EVENT_ID", "PLAYER_ID", "TEAM_ID", "PERIOD", "SHOT_DISTANCE", "LOC_X", "LOC_Y", "SHOT_ATTEMPTED_FLAG","SHOT_MADE_FLAG", "MINUTES_REMAINING", "SECONDS_REMAINING")
+shots_2025[cols_num] <- sapply(shots_2025[cols_num],as.numeric)
+shots_2025
+```
+
+```{r}
+shots_2025 = shots_2025 %>% 
+  mutate(OPPOSING_TEAM_NAME = ifelse(TEAM_NAME == HTM, VTM, HTM)) %>% 
+  relocate(OPPOSING_TEAM_NAME, .after = TEAM_NAME)
+shots_2025
+```
+
+```{r}
+shots_2025 = shots_2025 %>%
+  mutate(QUARTER_TIME_LEFT = MINUTES_REMAINING * 60 + SECONDS_REMAINING) %>%
+  mutate(GAME_TIME_LEFT = case_when(
+    PERIOD <= 4 ~ (4 - PERIOD) * 12 * 60 + MINUTES_REMAINING * 60 + SECONDS_REMAINING,
+    PERIOD %in% c(5, 6, 7, 8) ~ MINUTES_REMAINING * 60 + SECONDS_REMAINING
+  )) %>% relocate(QUARTER_TIME_LEFT, .after = SECONDS_REMAINING) %>%
+  relocate(GAME_TIME_LEFT, .after = QUARTER_TIME_LEFT)
+shots_2025 
+```
+
