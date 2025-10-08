@@ -175,9 +175,14 @@ team_xp_scored <- shots_2025_xp %>%
   summarize(TOTAL_POINTS = sum(PTS), EXPECTED_TOTAL_POINTS = sum(EXPECTED_POINTS), FGA = sum(SHOT_ATTEMPTED_FLAG), 
             POINTS_PER_100 = (TOTAL_POINTS / FGA)*100, EXPECTED_POINTS_PER_100 = (EXPECTED_TOTAL_POINTS / FGA)*100)
 
-num_of_shots <- sum(team_xp_scored$FGA)
-
-
+##Team Summary Table Expected Points Allowed
+team_xp_allowed <- shots_2025_xp %>%
+  group_by(OPPOSING_TEAM_NAME) %>% 
+  summarize(TOTAL_POINTS_ALLOWED = sum(PTS), 
+            EXPECTED_TOTAL_POINTS_ALLOWED = sum(EXPECTED_POINTS), 
+            FG_ALLOWED = sum(SHOT_ATTEMPTED_FLAG), 
+            POINTS_ALLOWED_PER_100 = (TOTAL_POINTS_ALLOWED / FG_ALLOWED)*100,
+            EXPECTED_POINTS_ALLOWED_PER_100 = (EXPECTED_TOTAL_POINTS_ALLOWED / FG_ALLOWED)*100)
 ```
 
 A summary for our logistic model is shown below. It shows which variables are the most significant (or in other words, which have the strongest relationship with the probability that a shot is made).
