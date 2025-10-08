@@ -1,0 +1,183 @@
+---
+title: "The Logistic Model"
+author: "JP Daliere"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library("hoopR")
+library("dplyr")
+library(tictoc)
+library(devtools)
+library(pacman)
+```
+
+First, we clean the data. We derive two new variables: quarter_time_left (seconds remaining in the quarter) and game_time_left (seconds remaining in the game). We also convert all of our variables to the appropriate type. This prepares our data for analysis.
+
+```{r}
+
+shots_2025 = shots_2025 %>% 
+  mutate(TEAM_NAME = case_when(
+  TEAM_NAME == "New York Knicks" ~ "NYK",
+  TEAM_NAME == "Houston Rockets" ~ "HOU",
+  TEAM_NAME == "Miami Heat" ~ "MIA",
+  TEAM_NAME == "Toronto Raptors" ~ "TOR",
+  TEAM_NAME == "Memphis Grizzlies" ~ "MEM",
+  TEAM_NAME == "Denver Nuggets" ~ "DEN",
+  TEAM_NAME == "Minnesota Timberwolves" ~ "MIN",
+  TEAM_NAME == "Phoenix Suns" ~ "PHX",
+  TEAM_NAME == "Cleveland Cavaliers" ~ "CLE",
+  TEAM_NAME == "New Orleans Pelicans" ~ "NOP",
+  TEAM_NAME == "Golden State Warriors" ~ "GSW",
+  TEAM_NAME == "Milwaukee Bucks" ~ "MIL",
+  TEAM_NAME == "Orlando Magic" ~ "ORL",
+  TEAM_NAME == "Portland Trail Blazers" ~ "POR",
+  TEAM_NAME == "Washington Wizards" ~ "WAS",
+  TEAM_NAME == "LA Clippers" ~ "LAC",
+  TEAM_NAME == "Charlotte Hornets" ~ "CHA",
+  TEAM_NAME == "Chicago Bulls" ~ "CHI",
+  TEAM_NAME == "Atlanta Hawks" ~ "ATL",
+  TEAM_NAME == "San Antonio Spurs" ~ "SAS",
+  TEAM_NAME == "Brooklyn Nets" ~ "BKN",
+  TEAM_NAME == "Philadelphia 76ers" ~ "PHI",
+  TEAM_NAME == "Indiana Pacers" ~ "IND",
+  TEAM_NAME == "Boston Celtics" ~ "BOS",
+  TEAM_NAME == "Dallas Mavericks" ~ "DAL",
+  TEAM_NAME == "Sacramento Kings" ~ "SAC",
+  TEAM_NAME == "Oklahoma City Thunder" ~ "OKC",
+  TEAM_NAME == "Los Angeles Lakers" ~ "LAL",
+  TEAM_NAME == "Utah Jazz" ~ "UTA",
+  TEAM_NAME == "Detroit Pistons" ~ "DET"
+)) 
+
+cols_num = c("GAME_ID", "GAME_EVENT_ID", "PLAYER_ID", "TEAM_ID", "PERIOD", "SHOT_DISTANCE", "LOC_X", "LOC_Y", "SHOT_ATTEMPTED_FLAG","SHOT_MADE_FLAG", "MINUTES_REMAINING", "SECONDS_REMAINING")
+shots_2025[cols_num] <- sapply(shots_2025[cols_num],as.numeric)
+
+
+shots_2025 = shots_2025 %>% 
+  mutate(OPPOSING_TEAM_NAME = ifelse(TEAM_NAME == HTM, VTM, HTM)) %>% 
+  relocate(OPPOSING_TEAM_NAME, .after = TEAM_NAME)
+
+shots_2025 = shots_2025 %>%
+  mutate(QUARTER_TIME_LEFT = MINUTES_REMAINING * 60 + SECONDS_REMAINING) %>%
+  mutate(GAME_TIME_LEFT = case_when(
+    PERIOD <= 4 ~ (4 - PERIOD) * 12 * 60 + MINUTES_REMAINING * 60 + SECONDS_REMAINING,
+    PERIOD %in% c(5, 6, 7, 8) ~ MINUTES_REMAINING * 60 + SECONDS_REMAINING
+  )) %>% relocate(QUARTER_TIME_LEFT, .after = SECONDS_REMAINING) %>%
+  relocate(GAME_TIME_LEFT, .after = QUARTER_TIME_LEFT)
+
+shots_2025 <- shots_2025 %>% 
+  mutate(ID = row_number()) %>% 
+  mutate(SHOT_TYPE = as.factor(SHOT_TYPE)) %>%
+  mutate(ACTION_TYPE = as.factor(ACTION_TYPE)) %>% 
+  mutate(SHOT_ZONE_BASIC = as.factor(SHOT_ZONE_BASIC)) %>% 
+  mutate(SHOT_ZONE_AREA = as.factor(SHOT_ZONE_AREA)) %>% 
+  mutate(SHOT_ZONE_RANGE = as.factor(SHOT_ZONE_RANGE)) %>% 
+  mutate(POSSIBLE_POINTS = case_when(
+    SHOT_TYPE == "2PT Field Goal" ~ 2,
+    SHOT_TYPE == "3PT Field Goal" ~ 3
+  ))
+```
+
+Next, we assess the accuracy of a logistic regression model. We compute the average log loss over 100 training-test splits (75% Training/25% Testing).
+
+```{r}
+##Create a function for log loss computation
+logloss <- function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+```
+
+```{r}
+##Set number of simulations to 100
+n_sims <- 100
+
+##Initialize training and testing log loss vectors
+train_logloss <- rep(NA, times = n_sims)
+test_logloss <- rep(NA, times = n_sims)
+
+##Set our training df to be 75% of the full df
+n_row <- nrow(shots_2025)
+n_train <- floor(0.75 * n_row)
+
+##Create 100 training-testing splits. For each split, we train the model using the training df and make predictions on both the training and testing dataframes.
+for(r in 1:n_sims){
+  set.seed(479+r)
+  train_data <-
+    shots_2025 |>
+    dplyr::slice_sample(n = n_train)
+  test_data <-
+    shots_2025 |>
+    dplyr::anti_join(y = train_data, by = "ID") 
+
+  fit <- glm(formula = SHOT_MADE_FLAG ~ PERIOD + MINUTES_REMAINING + SECONDS_REMAINING + QUARTER_TIME_LEFT + GAME_TIME_LEFT + ACTION_TYPE + SHOT_TYPE + SHOT_ZONE_RANGE + SHOT_ZONE_AREA + SHOT_ZONE_BASIC + SHOT_DISTANCE + LOC_X + LOC_Y, data = train_data, family = binomial("logit"))
+  
+##Here, we are predicting the probability that a shot is made.
+  train_preds <-
+   suppressWarnings(predict(object = fit,
+          newdata = train_data,
+          type = "response"))
+  
+  test_preds <-
+   suppressWarnings(predict(object = fit,
+           newdata = test_data,
+           type = "response"))
+  
+##Convert probabilities to expected points
+  train_data$train_probs <- train_preds
+  train_data <- train_data %>% 
+    mutate(EXPECTED_POINTS = train_preds * POSSIBLE_POINTS)
+  
+  test_data$test_probs <- test_preds
+  test_data <- test_data %>% 
+    mutate(EXPECTED_POINTS = test_preds * POSSIBLE_POINTS)
+  
+##Compute log loss on the training and testing sets and store the values in the training and testing log loss vectors.
+  train_logloss[r] <-
+    logloss(train_data$PTS, train_data$EXPECTED_POINTS)
+  test_logloss[r] <-
+    logloss(test_data$PTS, test_data$EXPECTED_POINTS)
+}
+
+##Print out the average training and testing log loss over 100 splits.
+cat("Dist training logloss:", round(mean(train_logloss), digits = 3), "\n"); cat("Dist testing logloss:", round(mean(test_logloss), digits = 3), "\n")
+```
+
+The average log loss for the training and testing datasets are -3.63 and -3.605 respectively.
+
+Next, we built an expected points model. We first trained our model using the entire shots dataframe. Then we used it to compute expected points.
+
+```{r}
+set.seed(479)
+
+##Train the model on the entire shots df
+full_df_fit <- glm(formula = SHOT_MADE_FLAG ~ PERIOD + MINUTES_REMAINING + SECONDS_REMAINING + QUARTER_TIME_LEFT + GAME_TIME_LEFT + ACTION_TYPE + SHOT_TYPE + SHOT_ZONE_RANGE + SHOT_ZONE_AREA + SHOT_ZONE_BASIC + SHOT_DISTANCE + LOC_X + LOC_Y, data = shots_2025, family = binomial("logit"))
+
+##Predictions for the probability that a shot is made
+probability_preds <-
+   suppressWarnings(predict(object = full_df_fit,
+          newdata = shots_2025,
+          type = "response"))
+
+##Append probability predictions and compute expected points
+shots_2025_xp <- shots_2025 %>% 
+  mutate(expected_probability = probability_preds) %>% 
+  mutate(EXPECTED_POINTS = expected_probability * POSSIBLE_POINTS)
+
+##Team Summary Table Expected Points Scored
+team_xp_scored <- shots_2025_xp %>%
+  group_by(TEAM_NAME) %>% 
+  summarize(TOTAL_POINTS = sum(PTS), EXPECTED_TOTAL_POINTS = sum(EXPECTED_POINTS), FGA = sum(SHOT_ATTEMPTED_FLAG), 
+            POINTS_PER_100 = (TOTAL_POINTS / FGA)*100, EXPECTED_POINTS_PER_100 = (EXPECTED_TOTAL_POINTS / FGA)*100)
+
+num_of_shots <- sum(team_xp_scored$FGA)
+
+
+```
+
+A summary for our logistic model is shown below. It shows which variables are the most significant (or in other words, which have the strongest relationship with the probability that a shot is made).
