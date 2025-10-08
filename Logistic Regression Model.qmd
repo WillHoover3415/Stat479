@@ -69,7 +69,7 @@ shots_2025 = shots_2025 %>%
   relocate(GAME_TIME_LEFT, .after = QUARTER_TIME_LEFT)
 
 shots_2025 <- shots_2025 %>% 
-  mutate(ID = row_number()) %>% 
+  mutate(SHOT_ID = row_number()) %>% 
   mutate(SHOT_TYPE = as.factor(SHOT_TYPE)) %>%
   mutate(ACTION_TYPE = as.factor(ACTION_TYPE)) %>% 
   mutate(SHOT_ZONE_BASIC = as.factor(SHOT_ZONE_BASIC)) %>% 
@@ -95,7 +95,7 @@ logloss <- function(y, phat){
 
 ```{r}
 ##Set number of simulations to 100
-n_sims <- 100
+n_sims <- 2
 
 ##Initialize training and testing log loss vectors
 train_logloss <- rep(NA, times = n_sims)
@@ -113,7 +113,7 @@ for(r in 1:n_sims){
     dplyr::slice_sample(n = n_train)
   test_data <-
     shots_2025 |>
-    dplyr::anti_join(y = train_data, by = "ID") 
+    dplyr::anti_join(y = train_data, by = "SHOT_ID") 
 
   fit <- glm(formula = SHOT_MADE_FLAG ~ PERIOD + MINUTES_REMAINING + SECONDS_REMAINING + QUARTER_TIME_LEFT + GAME_TIME_LEFT + ACTION_TYPE + SHOT_TYPE + SHOT_ZONE_RANGE + SHOT_ZONE_AREA + SHOT_ZONE_BASIC + SHOT_DISTANCE + LOC_X + LOC_Y, data = train_data, family = binomial("logit"))
   
@@ -182,7 +182,53 @@ team_xp_allowed <- shots_2025_xp %>%
             EXPECTED_TOTAL_POINTS_ALLOWED = sum(EXPECTED_POINTS), 
             FG_ALLOWED = sum(SHOT_ATTEMPTED_FLAG), 
             POINTS_ALLOWED_PER_100 = (TOTAL_POINTS_ALLOWED / FG_ALLOWED)*100,
-            EXPECTED_POINTS_ALLOWED_PER_100 = (EXPECTED_TOTAL_POINTS_ALLOWED / FG_ALLOWED)*100)
+            EXPECTED_POINTS_ALLOWED_PER_100 = (EXPECTED_TOTAL_POINTS_ALLOWED / FG_ALLOWED)*100) %>% 
+  rename(TEAM_NAME = OPPOSING_TEAM_NAME)
+
+team_xp_combined <- merge(team_xp_scored, team_xp_allowed, by = "TEAM_NAME") %>% 
+  mutate(TOTAL_POINTS_DIFF = (TOTAL_POINTS - TOTAL_POINTS_ALLOWED)) %>% 
+  mutate(EXPECTED_POINT_DIFF = (EXPECTED_TOTAL_POINTS - EXPECTED_TOTAL_POINTS_ALLOWED))
 ```
 
 A summary for our logistic model is shown below. It shows which variables are the most significant (or in other words, which have the strongest relationship with the probability that a shot is made).
+
+```{r}
+set.seed(479)
+  train_data <-
+    shots_2025 |>
+    dplyr::slice_sample(n = n_train)
+  test_data <-
+    shots_2025 |>
+    dplyr::anti_join(y = train_data, by = "SHOT_ID") 
+
+  fit <- glm(formula = SHOT_MADE_FLAG ~ PERIOD + MINUTES_REMAINING + SECONDS_REMAINING + QUARTER_TIME_LEFT + GAME_TIME_LEFT + ACTION_TYPE + SHOT_TYPE + SHOT_ZONE_RANGE + SHOT_ZONE_AREA + SHOT_ZONE_BASIC + SHOT_DISTANCE + LOC_X + LOC_Y, data = train_data, family = binomial("logit"))
+  
+##Here, we are predicting the probability that a shot is made.
+  train_preds <-
+   suppressWarnings(predict(object = fit,
+          newdata = train_data,
+          type = "response"))
+  
+  test_preds <-
+   suppressWarnings(predict(object = fit,
+           newdata = test_data,
+           type = "response"))
+  
+##Convert probabilities to expected points
+  train_data$train_probs <- train_preds
+  train_data <- train_data %>% 
+    mutate(EXPECTED_POINTS = train_preds * POSSIBLE_POINTS)
+  
+  test_data$test_probs <- test_preds
+  test_data <- test_data %>% 
+    mutate(EXPECTED_POINTS = test_preds * POSSIBLE_POINTS)
+  
+  train_logloss <-
+    logloss(train_data$PTS, train_data$EXPECTED_POINTS)
+  test_logloss <-
+    logloss(test_data$PTS, test_data$EXPECTED_POINTS)
+
+
+##Print out the average training and testing log loss over 100 splits.
+cat("Dist training logloss:", train_logloss, "\n"); cat("Dist testing logloss:", test_logloss, "\n")
+```
