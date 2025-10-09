@@ -276,6 +276,122 @@ ggplot(Offense_and_Defense,
        y = "Expected Combined points")
 ```
 
+```{r}
+nba_standings = tribble(
+  ~TEAM_NAME, ~W, ~L, ~WinPct,
+  "CLE", 64, 18, 0.780,
+  "BOS", 61, 21, 0.744,
+  "NYK", 51, 31, 0.622,
+  "IND", 50, 32, 0.610,
+  "MIL", 48, 34, 0.585,
+  "DET", 44, 38, 0.537,
+  "ORL", 41, 41, 0.500,
+  "ATL", 40, 42, 0.488,
+  "CHI", 39, 43, 0.476,
+  "MIA", 37, 45, 0.451,
+  "TOR", 30, 52, 0.366,
+  "BKN", 26, 56, 0.317,
+  "PHI", 24, 58, 0.293,
+  "CHA", 19, 63, 0.232,
+  "WAS", 18, 64, 0.220,
+  "OKC", 68, 14, 0.829,
+  "HOU", 52, 30, 0.634,
+  "LAL", 50, 32, 0.610,
+  "DEN", 50, 32, 0.610,
+  "LAC", 50, 32, 0.610,
+  "MIN", 49, 33, 0.598,
+  "GSW", 48, 34, 0.585,
+  "MEM", 48, 34, 0.585,
+  "SAC", 40, 42, 0.488,
+  "DAL", 39, 43, 0.476,
+  "PHX", 36, 46, 0.439,
+  "POR", 36, 46, 0.439,
+  "SAS", 34, 48, 0.415,
+  "NOP", 21, 61, 0.256,
+  "UTA", 17, 65, 0.207
+)
+```
+
+
+
+### codes made for Pythagorean win percentage. 
+```{r}
+
+Expected_Offense = Expected_vs_Actual_2.0 %>% 
+  mutate(Team_abbreviation = Team_abbreviation[TEAM_NAME])%>% 
+  select(TEAM_NAME, Team_abbreviation, expected_points_scored = expected_points) 
+
+
+Expected_Defense = Expected_vs_Actual_defense %>% 
+  rename(Team_abbreviation = Opponents)%>% select(Team_abbreviation, expected_points_allowed) 
+
+Games_per_team = shots_2025 %>% 
+  select(TEAM_NAME, GAME_ID)%>% 
+  distinct()%>% 
+  count(TEAM_NAME, name = "games") 
+
+pythagorean_win = Expected_Offense %>% 
+  left_join(Expected_Defense, by = "Team_abbreviation")%>% 
+  left_join(Games_per_team, by = "TEAM_NAME")%>% 
+  mutate(expected_points = expected_points_scored / games, expected_points_against = expected_points_allowed / games, pythagorean_win_percentage = (expected_points^1.83) / ((expected_points^1.83)+(expected_points_against^1.83)), expected_wins = pythagorean_win_percentage * games, expected_losses = games - expected_wins)
+
+pythagorean_win = pythagorean_win %>%
+  mutate(expected_wins = round(expected_wins),
+         expected_losses = round(expected_losses))
+```
+
+
+### Using Brier and log loss to see the acuracy
+```{r}
+brier = function(y, phat){
+  return(mean((y-phat)^2))
+}
+
+log_loss = function(y, phat){
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+
+Comparison = pythagorean_win %>%
+  select(TEAM_NAME, Team_abbreviation, pythagorean_win_percentage) %>%
+  left_join(nba_standings, by = c("Team_abbreviation" = "TEAM_NAME"))%>%
+  rename(true_win_percentage = WinPct, predicted_win_percentage = pythagorean_win_percentage)
+
+brier_comparison = brier(Comparison$true_win_percentage, Comparison$predicted_win_percentage)
+brier_comparison
+
+log_loss_season = log_loss(Comparison$true_win_percentage, Comparison$predicted_win_percentage)
+log_loss_season
+
+```
+
+
+
+###shows the accuracey for the brier and log loss score 
+```{r}
+set.seed(5)
+
+simulate_score = function(df, games_per_team = 82){
+  game_level = df %>%
+    tidyr::uncount(games_per_team) %>%
+    mutate(actual = rbinom(n(), size = 1, prob = true_win_percentage),
+           prediction = pmin(pmax(predicted_win_percentage, 1e-12),1-1e-12),
+           each_brier = (prediction-actual)^2,
+           each_log_loss = -(actual * log(prediction)+(1-actual)* log(1-prediction))
+           )
+  tibble(mean_brier = mean(game_level$each_brier),
+         mean_log_loss = mean(game_level$each_log_loss))}
+
+results = bind_rows(
+  simulate_score(Comparison),
+  simulate_score(Comparison),
+  simulate_score(Comparison))
+
+results %>% summarize(average_brier = mean(mean_brier),
+                      average_log_loss = mean(mean_log_loss))
+
+```
 
 
 
