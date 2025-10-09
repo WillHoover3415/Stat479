@@ -1,0 +1,1086 @@
+---
+title: "Exploratory RMD"
+author: "Will Hoover, J.P. Daliere, Roy Son"
+date: "2025-10-10"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("hoopR")
+library("dplyr")
+library(tictoc)
+library(devtools)
+library(pacman)
+library(ranger)
+library(ggplot2)
+library(expss)
+```
+
+
+
+
+## Executive Report
+
+Analysis of NBA shot attempt data is concerned with the following problem. How can team performance be quantified in terms of the shots they take? Formally speaking, how can the expected points value for the shots teams take quantify how teams are performing relative to their expectations? In this report, three statistical models will be built to compute the probability of a particular shot attempt resulting in a score, as well as computing the expected point value for each shot. These models will then be used to measure which teams over/under perform based on these expected values, whereas the "best" model will be selected based on both quantitative and qualitative considerations.
+
+The three models were built using increasingly robust statistical methods, with model one using the most naive and basic methodology, whereas the final two models were both trained on the existing shot data to identify higher level patterns and trends.
+
+
+## Technical Analysis
+
+
+
+Question:
+
+In basketball, the simplest, most elementary goal of the game is to outscore the opposition, and of course the primary method of scoring is through field goal attempts. Given this intuition, a natural question arises: How can individual level events such as field goal attempts be used to predict and quantify team performance? I.e., how well does the expected points value of each field goal attempt per team translate into wins, and which teams are performing above and below expectations?
+
+
+In this report, we will build three models to compute the probability that a player makes a field goal, and use these probabilities to compute expected points per shot for every field goal attempt in the data set. For each model, these expected points will be used to quantify and compare team performance across the league, both in terms of over and under performance, as well as how closely each model estimates the observed results. Using these results in accordance with statistical performance metrics and qualitative considerations, the "best" model for predicting and measuring team performance will be determined.
+
+
+### Data Construction and Cleaning
+
+One of (if not the) premier tasks of a data scientist is properly cleaning, pre-processing, and preparing data before any form of advanced analysis can be performed. For this specific project, this proved to be the most challenging part of the project. This is primarily caused by the difficulty of extracting the shots data, was well as crucial missing information relating to free throws. 
+
+Free throws are a unique statistical anomaly of basketball, as a free throw is not a type field goal attempt, even though a free throw can yield a score. Thus, this data wasn't included in the shot-tracking data. Data for free throws was nested inside a different data set, however combining these two data sets would be a daunting task. Each set was produced by a different organization, and thus different identification codes for each player were present, as well as different formats of storing such data. Additionally, since free throws are quite different from a regular field goal attempt, including free throws in an expected points model would lead to disastrous interpret ability problems, and lead to a wide range of inaccuracies.
+
+Thus, it was decided to exclude free throws from consideration in each model, and attempt to quantify ... without them.
+
+
+Here, we source the data from HoopR's commonallplayers package, and subsequently filter out players in the 2024-25 season and get their respective player ids. The main data frame is then built using rate limiting to extract all shots in the 24-25 season, as manual extraction of each shot yielded in an empty data frame. These cells as well as several others are commented out due to the delicacy and length of the operation,as well as the fact the data has already been saved to the local machine. These cells can be easily un-commented for manual verification.
+
+```{r}
+# idss = as.data.frame(nba_commonallplayers())
+# players_2025 = idss %>% filter(CommonAllPlayers.TO_YEAR == 2025)
+# ids_2025 = players_2025$CommonAllPlayers.PERSON_ID
+# ids_2025
+
+# shots_2025 = data.frame()
+# 
+# for (id in ids_2025){
+#   cat("Processing player:", id, "\n")  # Track progress
+#   
+#   tryCatch({
+#     player_shots = hoopR::nba_shotchartdetail(player_id = id)$Shot_Chart_Detail
+#     shots_2025 = rbind(shots_2025, player_shots)
+#     
+#     cat("Success! Got", nrow(player_shots), "shots for player", id, "\n")
+#     
+#     # Rate limit: wait 2 seconds between requests
+#     Sys.sleep(2)
+#     
+#   }, error = function(e) {
+#     cat("Error with player", id, ":", e$message, "\n")
+#     Sys.sleep(2)  # Still wait even on error
+#   })
+# }
+# shots_2025
+```
+
+
+```{r}
+load("shots_2025.Rda")
+shots_2025
+```
+
+Next, the data is cleaned and transformed. First, we calculate the amount of points scored for each shot in the data set, as it makes more sense to work with a numerical value.
+
+```{r}
+# shots_2025 = shots_2025 %>% mutate(PTS = case_when(
+#   SHOT_MADE_FLAG == 1 & SHOT_TYPE == "3PT Field Goal" ~ 3,
+#   SHOT_MADE_FLAG == 1 & SHOT_TYPE == "2PT Field Goal" ~ 2,
+#   TRUE ~ 0
+# )) %>% relocate(PTS, .after = SHOT_MADE_FLAG)
+# shots_2025
+```
+
+
+Team names are then abbreviated for readability and consistency, as not all forms of team name were uniform across the data set.
+
+```{r}
+# shots_players_ids = shots_2025 %>% select(PLAYER_NAME, PLAYER_ID)
+# 
+# shots_2025 = shots_2025 %>% mutate(TEAM_NAME = case_when(
+#   TEAM_NAME == "New York Knicks" ~ "NYK",
+#   TEAM_NAME == "Houston Rockets" ~ "HOU",
+#   TEAM_NAME == "Miami Heat" ~ "MIA",
+#   TEAM_NAME == "Toronto Raptors" ~ "TOR",
+#   TEAM_NAME == "Memphis Grizzlies" ~ "MEM",
+#   TEAM_NAME == "Denver Nuggets" ~ "DEN",
+#   TEAM_NAME == "Minnesota Timberwolves" ~ "MIN",
+#   TEAM_NAME == "Phoenix Suns" ~ "PHX",
+#   TEAM_NAME == "Cleveland Cavaliers" ~ "CLE",
+#   TEAM_NAME == "New Orleans Pelicans" ~ "NOP",
+#   TEAM_NAME == "Golden State Warriors" ~ "GSW",
+#   TEAM_NAME == "Milwaukee Bucks" ~ "MIL",
+#   TEAM_NAME == "Orlando Magic" ~ "ORL",
+#   TEAM_NAME == "Portland Trail Blazers" ~ "POR",
+#   TEAM_NAME == "Washington Wizards" ~ "WAS",
+#   TEAM_NAME == "LA Clippers" ~ "LAC",
+#   TEAM_NAME == "Charlotte Hornets" ~ "CHA",
+#   TEAM_NAME == "Chicago Bulls" ~ "CHI",
+#   TEAM_NAME == "Atlanta Hawks" ~ "ATL",
+#   TEAM_NAME == "San Antonio Spurs" ~ "SAS",
+#   TEAM_NAME == "Brooklyn Nets" ~ "BKN",
+#   TEAM_NAME == "Philadelphia 76ers" ~ "PHI",
+#   TEAM_NAME == "Indiana Pacers" ~ "IND",
+#   TEAM_NAME == "Boston Celtics" ~ "BOS",
+#   TEAM_NAME == "Dallas Mavericks" ~ "DAL",
+#   TEAM_NAME == "Sacramento Kings" ~ "SAC",
+#   TEAM_NAME == "Oklahoma City Thunder" ~ "OKC",
+#   TEAM_NAME == "Los Angeles Lakers" ~ "LAL",
+#   TEAM_NAME == "Utah Jazz" ~ "UTA",
+#   TEAM_NAME == "Detroit Pistons" ~ "DET"
+# ))
+# 
+
+```
+
+
+
+```{r}
+# save(shots_2025, file = "shots_2025.Rda")
+```
+
+Several columns were of the wrong type, as many columns with all numbers were in character, not numerical format. This was fixed using the handy sapply function in R, where all columns lacking proper numerical format were transformed at once.
+
+```{r}
+
+# cols_num = c("GAME_ID", "GAME_EVENT_ID", "PLAYER_ID", "TEAM_ID", "PERIOD", "SHOT_DISTANCE", "LOC_X", "LOC_Y", "SHOT_ATTEMPTED_FLAG","SHOT_MADE_FLAG", "MINUTES_REMAINING", "SECONDS_REMAINING")
+# shots_2025[cols_num] <- sapply(shots_2025[cols_num],as.numeric)
+# shots_2025
+
+```
+
+
+For interpret ability, we must also drop the notion of "home" and "away" team, and replace each game with a "team" and "opposing team". The dataset provides information about "home" and "visiting" teams, but not which team the player attempted a field goal against. Thus, we account for this by specifying the opposing team as the team not matching the players team. 
+
+```{r}
+# shots_2025 = shots_2025 %>% 
+#   mutate(OPPOSING_TEAM_NAME = ifelse(TEAM_NAME == HTM, VTM, HTM)) %>% 
+#   relocate(OPPOSING_TEAM_NAME, .after = TEAM_NAME)
+# shots_2025
+```
+
+
+We can consider the potential impact on time remaining in the game on the probability of making a shot. Thus, we identify the amount of time remaining in each game, as well as the amount of time remaining in each quarter, while additionally considering what these values look like in an overtime period.
+
+```{r}
+shots_2025 = shots_2025 %>%
+  mutate(QUARTER_TIME_LEFT = MINUTES_REMAINING * 60 + SECONDS_REMAINING) %>%
+  mutate(GAME_TIME_LEFT = case_when(
+    PERIOD <= 4 ~ (4 - PERIOD) * 12 * 60 + MINUTES_REMAINING * 60 + SECONDS_REMAINING,
+    PERIOD %in% c(5, 6, 7, 8) ~ MINUTES_REMAINING * 60 + SECONDS_REMAINING
+  )) %>% relocate(QUARTER_TIME_LEFT, .after = SECONDS_REMAINING) %>%
+  relocate(GAME_TIME_LEFT, .after = QUARTER_TIME_LEFT)
+shots_2025
+```
+
+
+For identification purposes, each row is marked with a unique number from 1 up to the last row. This step proves useful in the pre-processing of the random forest model. The changes are then saved onto the local machine, such that the lengthy data extraction does not need to be repeated. The data can be easily retrieved using the load function, which saves the data frame in the global environment.
+
+```{r}
+# shots_2025 = shots_2025 %>% mutate(row_id = 1:nrow(shots_2025)) 
+```
+
+```{r}
+save(shots_2025, file = "shots_2025.Rda")
+```
+
+
+```{r}
+load("shots_2025.Rda")
+```
+
+
+
+
+
+
+Model performance metrics are also defined.
+
+```{r}
+misclass <- function(y, phat){
+  return( mean( (y != 1*(phat >= 0.5))))
+}
+
+brier <- function(y, phat){
+  return(mean( (y - phat)^2 ))
+}
+
+
+# Define log-loss to measure model accuracy
+logloss = function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+
+logloss
+
+```
+
+```{r}
+
+table(shots_2025$ACTION_TYPE, shots_2025$SHOT_DISTANCE >= 15)
+```
+
+
+### Model 1: Naive Binning and Averaging
+
+One key assumption for this modeling technique is that the calculations inherently assume that each player has the same latent skill level when making
+
+```{r}
+shots = shots_2025 %>%
+  select(PLAYER_NAME, TEAM_NAME, SHOT_DISTANCE, SHOT_TYPE, SHOT_ZONE_BASIC, PTS, SHOT_MADE_FLAG)
+shots
+```
+
+
+
+```{r}
+# Create team name mapping
+team_mapping <- c(
+  "NYK" = "New York Knicks", "HOU" = "Houston Rockets", "MIA" = "Miami Heat",
+  "TOR" = "Toronto Raptors", "MEM" = "Memphis Grizzlies", "DEN" = "Denver Nuggets",
+  "MIN" = "Minnesota Timberwolves", "PHX" = "Phoenix Suns", "CLE" = "Cleveland Cavaliers",
+  "NOP" = "New Orleans Pelicans", "GSW" = "Golden State Warriors", "MIL" = "Milwaukee Bucks",
+  "ORL" = "Orlando Magic", "POR" = "Portland Trail Blazers", "WAS" = "Washington Wizards",
+  "LAC" = "LA Clippers", "CHA" = "Charlotte Hornets", "CHI" = "Chicago Bulls",
+  "ATL" = "Atlanta Hawks", "SAS" = "San Antonio Spurs", "BKN" = "Brooklyn Nets",
+  "PHI" = "Philadelphia 76ers", "IND" = "Indiana Pacers", "BOS" = "Boston Celtics",
+  "DAL" = "Dallas Mavericks", "SAC" = "Sacramento Kings", "OKC" = "Oklahoma City Thunder",
+  "LAL" = "Los Angeles Lakers", "UTA" = "Utah Jazz", "DET" = "Detroit Pistons"
+)
+
+shots_2025_model1.1 <- shots_2025 %>%
+  select(-c(QUARTER_TIME_LEFT, GAME_TIME_LEFT, row_id)) %>%
+  mutate(
+    TEAM_NAME = ifelse(TEAM_NAME %in% names(team_mapping), team_mapping[TEAM_NAME], TEAM_NAME),
+    OPPOSING_TEAM_NAME = ifelse(OPPOSING_TEAM_NAME %in% names(team_mapping), team_mapping[OPPOSING_TEAM_NAME], OPPOSING_TEAM_NAME)
+  )
+shots_2025_model1.1
+```
+
+
+###codes for total expected points by team 
+```{r}
+Team_abbreviation = c( "Atlanta Hawks" = "ATL", "Boston Celtics" = "BOS", "Brooklyn Nets" = "BKN",
+  "Charlotte Hornets" = "CHA", "Chicago Bulls" = "CHI", "Cleveland Cavaliers" = "CLE",
+  "Dallas Mavericks" = "DAL", "Denver Nuggets" = "DEN", "Detroit Pistons" = "DET",
+  "Golden State Warriors" = "GSW", "Houston Rockets" = "HOU", "Indiana Pacers" = "IND",
+  "LA Clippers" = "LAC", "Los Angeles Lakers" = "LAL", "Memphis Grizzlies" = "MEM",
+  "Miami Heat" = "MIA", "Milwaukee Bucks" = "MIL", "Minnesota Timberwolves" = "MIN",
+  "New Orleans Pelicans" = "NOP", "New York Knicks" = "NYK", "Oklahoma City Thunder" = "OKC",
+  "Orlando Magic" = "ORL", "Philadelphia 76ers" = "PHI", "Phoenix Suns" = "PHX",
+  "Portland Trail Blazers" = "POR", "Sacramento Kings" = "SAC", "San Antonio Spurs" = "SAS",
+  "Toronto Raptors" = "TOR", "Utah Jazz" = "UTA", "Washington Wizards" = "WAS")
+
+shots = shots %>%
+  mutate(SHOT_DISTANCE = as.numeric(SHOT_DISTANCE),
+         team_abbreviation = Team_abbreviation[TEAM_NAME],
+         Points_rule = case_when(
+           SHOT_MADE_FLAG == 1 & SHOT_TYPE == "3PT Field Goal" ~ 3,
+           SHOT_MADE_FLAG == 1 & SHOT_TYPE == "2PT Field Goal" ~ 2,
+           TRUE ~ 0
+         ))
+
+shots %>% 
+  arrange(desc(SHOT_DISTANCE))
+
+shots_by_ft = shots %>%
+  filter(!is.na(SHOT_DISTANCE)) %>%
+  mutate(distance_ft = floor(SHOT_DISTANCE))
+
+shots_by_ft2.0 = shots_by_ft %>% mutate(team_abbreviation = TEAM_NAME)
+
+league_average = shots_by_ft %>%
+  group_by(distance_ft, SHOT_TYPE)%>%
+  summarize(
+    attempt_league = n(),
+    made_shots_league = sum(SHOT_MADE_FLAG == 1, na.rm = TRUE),
+    fg_percentage_league = attempt_league / made_shots_league, 
+    expected_points_league = mean(Points_rule, na.rm = TRUE)
+  )
+
+scored_shots = shots_by_ft %>%
+  left_join(league_average %>%
+              select(distance_ft, SHOT_TYPE, expected_points_league),
+            by = c("distance_ft", "SHOT_TYPE"))%>%
+  mutate(expected_goal = expected_points_league)
+
+Expected_vs_Actual = scored_shots %>%
+  group_by(TEAM_NAME)%>%
+  summarize(
+    expected_points = sum(expected_goal, na.rm = TRUE),
+    actual_points = sum(Points_rule, naa.rm = TRUE),
+    number_of_shots = n(),
+    .groups = "drop"
+  )%>%mutate(residual = actual_points - expected_points)
+
+
+ggplot(Expected_vs_Actual,
+       aes(x = reorder(TEAM_NAME, residual),
+           y = residual,
+           fill = residual > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Residuals(Actual - Expected) by Team",xlab = "Team", ylab = "Residual Points")
+
+
+ggplot(Expected_vs_Actual,
+       aes(x = reorder(TEAM_NAME, expected_points),
+           y = expected_points,
+           fill = expected_points))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Total Expected Points by Team",
+       x = "Team",
+       y = "Expected Total Points")+
+  theme_minimal()
+  
+```
+
+```{r}
+league_avearage_2.0 = shots_by_ft %>%
+  group_by(distance_ft, SHOT_ZONE_BASIC, SHOT_TYPE)%>%
+  summarize(
+    attempt_league = n(),
+    made_shots_league = sum(SHOT_MADE_FLAG == 1, na.rm = TRUE),
+    fg_percentage_league = attempt_league / made_shots_league, 
+    expected_points_league = mean(Points_rule, na.rm = TRUE)
+  )
+  
+scored_shots_2.0 = shots_by_ft2.0 %>%
+  left_join(league_avearage_2.0 %>%
+              select(distance_ft, SHOT_ZONE_BASIC, SHOT_TYPE, expected_points_league),
+            by = c("distance_ft", "SHOT_ZONE_BASIC", "SHOT_TYPE")) %>%
+  mutate(expected_goal = expected_points_league)
+
+Expected_vs_Actual_2.0 = scored_shots_2.0 %>%
+  group_by(TEAM_NAME)%>%
+  summarize( 
+    expected_points = sum(expected_goal, na.rm = TRUE),
+    actual_points = sum(Points_rule, naa.rm = TRUE),
+    number_of_shots = n(),
+    .groups = "drop"
+  )%>%mutate(residual = actual_points - expected_points)
+
+ggplot(Expected_vs_Actual_2.0,
+       aes(x = reorder(TEAM_NAME, residual),
+           y = residual,
+           fill = residual > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Residuals(Actual - Expected) by Team",xlab = "Team", ylab = "Residual Points")
+
+
+ggplot(Expected_vs_Actual_2.0,
+       aes(x = reorder(TEAM_NAME, expected_points),
+           y = expected_points,
+           fill = expected_points))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Total Expected Points by Team",
+       x = "Team",
+       y = "Expected Total Points")+
+  theme_minimal()
+```
+
+```{r}
+Team_abbreviation = c( "Atlanta Hawks" = "ATL", "Boston Celtics" = "BOS", "Brooklyn Nets" = "BKN",
+  "Charlotte Hornets" = "CHA", "Chicago Bulls" = "CHI", "Cleveland Cavaliers" = "CLE",
+  "Dallas Mavericks" = "DAL", "Denver Nuggets" = "DEN", "Detroit Pistons" = "DET",
+  "Golden State Warriors" = "GSW", "Houston Rockets" = "HOU", "Indiana Pacers" = "IND",
+  "LA Clippers" = "LAC", "Los Angeles Lakers" = "LAL", "Memphis Grizzlies" = "MEM",
+  "Miami Heat" = "MIA", "Milwaukee Bucks" = "MIL", "Minnesota Timberwolves" = "MIN",
+  "New Orleans Pelicans" = "NOP", "New York Knicks" = "NYK", "Oklahoma City Thunder" = "OKC",
+  "Orlando Magic" = "ORL", "Philadelphia 76ers" = "PHI", "Phoenix Suns" = "PHX",
+  "Portland Trail Blazers" = "POR", "Sacramento Kings" = "SAC", "San Antonio Spurs" = "SAS",
+  "Toronto Raptors" = "TOR", "Utah Jazz" = "UTA", "Washington Wizards" = "WAS")
+
+
+
+
+shots_defense = shots_2025_model1.1 %>%
+  select(GAME_ID, HTM, VTM, PLAYER_NAME, TEAM_NAME, SHOT_DISTANCE, SHOT_TYPE,
+         SHOT_ZONE_BASIC, SHOT_MADE_FLAG, PTS)%>%
+  mutate(
+    SHOT_DISTANCE = as.numeric(SHOT_DISTANCE),
+    Points_rule = case_when(
+      SHOT_MADE_FLAG == 1 & SHOT_TYPE == "3PT Field Goal" ~ 3,
+      SHOT_MADE_FLAG == 1 & SHOT_TYPE == "2PT Field Goal" ~ 2,
+      TRUE ~ 0
+         ),
+    team_abbreviation = Team_abbreviation[TEAM_NAME],
+    Opponents = case_when(
+      team_abbreviation == HTM ~ VTM,
+      team_abbreviation == VTM ~ HTM,
+      TRUE ~ NA_character_
+    ))
+
+shots_by_ft_defense = shots_defense%>%
+  filter(!is.na(SHOT_DISTANCE))%>%
+  mutate(distance_ft = floor(SHOT_DISTANCE))
+
+league_average_defense = shots_by_ft_defense %>%
+  group_by(distance_ft, SHOT_TYPE)%>%
+  summarize(
+    attempt_league = n(),
+    made_shots_league = sum(SHOT_MADE_FLAG == 1, na.rm = TRUE),
+    fg_percentage_league = attempt_league / made_shots_league, 
+    expected_points_league = mean(Points_rule, na.rm = TRUE)
+  )
+
+scored_shots_defense = shots_by_ft_defense %>%
+  left_join(league_average_defense %>%
+              select(distance_ft, SHOT_TYPE, expected_points_league),
+            by = c("distance_ft","SHOT_TYPE")) %>%
+  mutate(expected_goal = expected_points_league)
+
+Expected_vs_Actual_defense = scored_shots_defense %>%
+  group_by(Opponents)%>%
+  summarize(
+    expected_points_allowed = sum(expected_goal, na.rm = TRUE),
+    actual_points_allowed = sum(Points_rule, naa.rm = TRUE),
+    number_of_shots_faced = n(),
+    .groups = "drop"
+  )%>% mutate(residuals_allowed = actual_points_allowed - expected_points_allowed )
+
+
+ggplot(Expected_vs_Actual_defense,
+       aes(x = reorder(Opponents, residuals_allowed),
+           y = residuals_allowed,
+           fill = residuals_allowed > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Residuals allowed(Actual - Expected) by Team",xlab = "Team", ylab = "Residual Points Allowed")
+
+
+ggplot(Expected_vs_Actual_defense,
+       aes(x = reorder(Opponents, expected_points_allowed),
+           y = expected_points_allowed,
+           fill = expected_points_allowed))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Total Expected Points allowed by Team",
+       x = "Team",
+       y = "Expected Total Points Allowed")+
+  theme_minimal()
+
+```
+
+```{r}
+shots_by_ft2.0
+```
+
+###Expected Combined Points by Teams 
+```{r}
+Expected_vs_Actual_2.0 = Expected_vs_Actual_2.0 %>%
+  mutate(Team_abbreviation = TEAM_NAME)
+
+
+Offense_and_Defense = Expected_vs_Actual_2.0 %>%
+  select(TEAM_NAME, Team_abbreviation,
+         expected_points_scored = expected_points,
+         actual_points_scored = actual_points,
+         resiudal_scored = residual)%>%
+  left_join(
+    Expected_vs_Actual_defense%>%
+      select(Opponents, 
+             expected_points_allowed,
+             actual_points_allowed,
+             residuals_allowed),
+    by = c("Team_abbreviation" = "Opponents")) %>%
+      mutate(
+        expected_combined_points = expected_points_scored - expected_points_allowed,
+        actual_combined_points = actual_points_scored - actual_points_allowed,
+        residual_combined = resiudal_scored - residuals_allowed
+      )
+```
+
+
+
+
+```{r}
+Offense_and_Defense
+```
+
+```{r}
+ggplot(Offense_and_Defense, 
+       aes(x = reorder(TEAM_NAME, residual_combined),
+           y = residual_combined, 
+           fill = residual_combined > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Combined (Offesne - Defense) Residuals by Team",
+       x = "Team",
+       y = "Net Residual Points")+
+  theme_minimal()
+
+ggplot(Offense_and_Defense, 
+       aes(x = reorder(TEAM_NAME, expected_combined_points),
+           y =  expected_combined_points,
+           fill = expected_combined_points))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Total Expected Combined Points by Teams",
+       x = "Team",
+       y = "Expected Combined points")
+```
+
+### Model 2: Logistic Regression
+
+One glaring issue with the binning and averaging over 
+
+
+```{r}
+shots_2025_model2 <- shots_2025 %>% 
+  mutate(SHOT_ID = row_number()) %>% 
+  mutate(SHOT_TYPE = as.factor(SHOT_TYPE)) %>%
+  mutate(ACTION_TYPE = as.factor(ACTION_TYPE)) %>% 
+  mutate(SHOT_ZONE_BASIC = as.factor(SHOT_ZONE_BASIC)) %>% 
+  mutate(SHOT_ZONE_AREA = as.factor(SHOT_ZONE_AREA)) %>% 
+  mutate(SHOT_ZONE_RANGE = as.factor(SHOT_ZONE_RANGE)) %>% 
+  mutate(POSSIBLE_POINTS = case_when(
+    SHOT_TYPE == "2PT Field Goal" ~ 2,
+    SHOT_TYPE == "3PT Field Goal" ~ 3
+  ))
+shots_2025_model2
+```
+
+```{r}
+n_sims2 <- 2
+
+## Initialize training and testing log loss vectors
+train_logloss2 <- rep(NA, times = n_sims2)
+test_logloss2 <- rep(NA, times = n_sims2)
+
+## Set our training df to be 75% of the full df
+n_row2 <- nrow(shots_2025_model2)
+n_train2 <- floor(0.75 * n_row2)
+
+## Create training-testing splits
+for(r in 1:n_sims2){
+  set.seed(479 + r)
+  
+  train_data2 <- shots_2025_model2 |> dplyr::slice_sample(n = n_train2)
+  test_data2 <- shots_2025_model2 |> dplyr::anti_join(y = train_data2, by = "SHOT_ID")
+  
+  fit2 <- glm(
+    formula = SHOT_MADE_FLAG ~ PERIOD + MINUTES_REMAINING + SECONDS_REMAINING + QUARTER_TIME_LEFT + GAME_TIME_LEFT + ACTION_TYPE + SHOT_TYPE + SHOT_ZONE_RANGE + SHOT_ZONE_AREA + SHOT_ZONE_BASIC + SHOT_DISTANCE + LOC_X + LOC_Y,
+    data = train_data2,
+    family = binomial("logit")
+  )
+  
+  ## Predict probabilities
+  train_preds2 <- suppressWarnings(predict(object = fit2, newdata = train_data2, type = "response"))
+  test_preds2 <- suppressWarnings(predict(object = fit2, newdata = test_data2, type = "response"))
+  
+  ## Convert probabilities to expected points
+  train_data2$train_probs2 <- train_preds2
+  train_data2 <- train_data2 %>% mutate(EXPECTED_POINTS2 = train_preds2 * POSSIBLE_POINTS)
+  
+  test_data2$test_probs2 <- test_preds2
+  test_data2 <- test_data2 %>% mutate(EXPECTED_POINTS2 = test_preds2 * POSSIBLE_POINTS)
+  
+  ## Compute log loss
+  train_logloss2[r] <- logloss(train_data2$PTS, train_data2$EXPECTED_POINTS2)
+  test_logloss2[r] <- logloss(test_data2$PTS, test_data2$EXPECTED_POINTS2)
+}
+
+## Print average log loss
+cat("Dist training logloss2:", round(mean(train_logloss2), digits = 3), "\n")
+cat("Dist testing logloss2:", round(mean(test_logloss2), digits = 3), "\n")
+```
+
+
+
+```{r}
+set.seed(479)
+
+## Train model on full dataset
+full_df_fit2 <- glm(
+  formula = SHOT_MADE_FLAG ~ PERIOD + MINUTES_REMAINING + SECONDS_REMAINING + QUARTER_TIME_LEFT + GAME_TIME_LEFT + ACTION_TYPE + SHOT_TYPE + SHOT_ZONE_RANGE + SHOT_ZONE_AREA + SHOT_ZONE_BASIC + SHOT_DISTANCE + LOC_X + LOC_Y,
+  data = shots_2025,
+  family = binomial("logit")
+)
+
+## Predict probabilities
+probability_preds2 <- suppressWarnings(predict(object = full_df_fit2, newdata = shots_2025, type = "response"))
+
+## Append predictions and compute expected points
+shots_2025_xp2 <- shots_2025_model2 %>%
+  mutate(expected_probability2 = probability_preds2) %>%
+  mutate(EXPECTED_POINTS2 = expected_probability2 * POSSIBLE_POINTS)
+```
+
+```{r}
+## Team Summary Table - Expected Points Scored
+team_xp_scored2 <- shots_2025_xp2 %>%
+  group_by(TEAM_NAME) %>%
+  summarize(
+    TOTAL_POINTS2 = sum(PTS),
+    EXPECTED_TOTAL_POINTS2 = sum(EXPECTED_POINTS2),
+    FGA2 = sum(SHOT_ATTEMPTED_FLAG),
+    POINTS_PER_1002 = (TOTAL_POINTS2 / FGA2) * 100,
+    EXPECTED_POINTS_PER_1002 = (EXPECTED_TOTAL_POINTS2 / FGA2) * 100
+  )
+
+## Team Summary Table - Expected Points Allowed
+team_xp_allowed2 <- shots_2025_xp2 %>%
+  group_by(OPPOSING_TEAM_NAME) %>%
+  summarize(
+    TOTAL_POINTS_ALLOWED2 = sum(PTS),
+    EXPECTED_TOTAL_POINTS_ALLOWED2 = sum(EXPECTED_POINTS2),
+    FG_ALLOWED2 = sum(SHOT_ATTEMPTED_FLAG),
+    POINTS_ALLOWED_PER_1002 = (TOTAL_POINTS_ALLOWED2 / FG_ALLOWED2) * 100,
+    EXPECTED_POINTS_ALLOWED_PER_1002 = (EXPECTED_TOTAL_POINTS_ALLOWED2 / FG_ALLOWED2) * 100
+  ) %>%
+  rename(TEAM_NAME = OPPOSING_TEAM_NAME)
+
+team_xp_combined2 <- merge(team_xp_scored2, team_xp_allowed2, by = "TEAM_NAME") %>%
+  mutate(TOTAL_POINT_DIFF2 = TOTAL_POINTS2 - TOTAL_POINTS_ALLOWED2) %>%
+  mutate(EXPECTED_POINT_DIFF2 = EXPECTED_TOTAL_POINTS2 - EXPECTED_TOTAL_POINTS_ALLOWED2) %>%
+  mutate(RESIDUAL_POINT_DIFF2 = TOTAL_POINT_DIFF2 - EXPECTED_POINT_DIFF2)
+```
+
+
+```{r}
+library(patchwork)
+
+## Expected vs Actual Point Differential
+expected_point_diff2 <- ggplot(team_xp_combined2) +
+  geom_col(aes(x = EXPECTED_POINT_DIFF2, y = reorder(TEAM_NAME, EXPECTED_POINT_DIFF2)), fill = "navy") +
+  xlab("Expected Point Differential") + ylab("Team Name") +
+  scale_x_continuous(breaks = seq(-2000, 1500, 250)) +
+  ggtitle("Expected Point Differential by Team") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+actual_point_diff2 <- ggplot(team_xp_combined2) +
+  geom_col(aes(x = TOTAL_POINT_DIFF2, y = reorder(TEAM_NAME, TOTAL_POINT_DIFF2)), fill = "navy") +
+  xlab("Actual Point Differential") + ylab("Team Name") +
+  scale_x_continuous(breaks = seq(-2000, 1500, 250)) +
+  ggtitle("Actual Point Differential by Team") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+residual_point_diff2 <- ggplot(team_xp_combined2) +
+  geom_col(aes(x = RESIDUAL_POINT_DIFF2, y = reorder(TEAM_NAME, RESIDUAL_POINT_DIFF2)), fill = "navy") +
+  xlab("Residual Point Differential") + ylab("Team Name") +
+  scale_x_continuous(breaks = seq(-2000, 1500, 250)) +
+  ggtitle("Residual (Actual - Expected) Point Differential by Team") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+expected_point_diff2
+actual_point_diff2
+residual_point_diff2
+```
+
+
+### Model 3: Random Forests and Feature Analysis
+
+  A natural question concerning the evaluation of high-dimensional, complex data is how the many features interact with each other. While it seems natural to keep fitting logistic regression models, it becomes incredibly complex to specify these interactions between continuous, discrete, and categorical factors. Random Forest models simplify these calculations by representing these interactions as an ensemble of randomized regression trees, hence making a forest. The predictive results from these trees are then averaged to produce a probabilistic result.
+  Fitting a random forest model for this particular data set is particularly complex, with the primary reason being the sheer size of the data. 204,316 field goal attempts were recorded in the 2024-25 NBA season, and running the typical 100 train/test splits yielded in memory overload. Thus, the model was trained on a single train/test split, which may yield in over fitting and bias. However, since Random Forest models are known for their ability to reduce over fit, and given that the data set is so large, this problem could be understated.
+  Several pre-processing steps were taken, which are listed in detail in the R chunks.
+  
+  
+  
+```{r, cache=TRUE}
+n = nrow(shots_2025)
+n_train = floor(0.75 * n) 
+n_test = n - n_train
+
+# Define log-loss to measure model accuracy
+logloss = function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+
+
+vars = c("PTS", "PERIOD", "MINUTES_REMAINING", "SECONDS_REMAINING", 
+         "QUARTER_TIME_LEFT", "GAME_TIME_LEFT", "ACTION_TYPE", "SHOT_TYPE", 
+         "SHOT_ZONE_BASIC", "SHOT_ZONE_AREA", "SHOT_ZONE_RANGE", 
+         "SHOT_DISTANCE", "LOC_X", "LOC_Y")
+
+shots_2025_forest = shots_2025 %>% mutate(
+  ACTION_TYPE = factor(ACTION_TYPE), # factor columns since we are classification problem
+  SHOT_TYPE = factor(SHOT_TYPE),
+  SHOT_ZONE_BASIC = factor(SHOT_ZONE_BASIC),
+  SHOT_ZONE_AREA = factor(SHOT_ZONE_AREA),
+  SHOT_ZONE_RANGE = factor(SHOT_ZONE_RANGE),
+  MADE = factor(ifelse(PTS > 0, 1, 0), levels = c(0, 1))
+)
+
+# n_runs was reduced from 100, 100 was far too slow and took up too much memory since dataset was so large
+n_runs = 1  
+train_logloss <- rep(NA, times = n_runs)
+test_logloss <- rep(NA, times = n_runs)
+
+for (r in 1:n_runs){
+  set.seed(479+r)
+  
+  # Split data
+  train_data = 
+    shots_2025_forest %>% 
+    slice_sample(n = n_train) %>% 
+    dplyr::select(dplyr::all_of(c("row_id", vars, "MADE")))
+  
+  test_data = 
+    shots_2025_forest %>% 
+    anti_join(y = train_data, by = "row_id") %>% 
+    dplyr::select(dplyr::all_of(c("row_id", vars, "MADE")))
+  
+  # Extract actual values (0 = miss, 1 = made)
+  made_train = as.numeric(as.character(train_data$MADE))
+  made_test = as.numeric(as.character(test_data$MADE))
+  
+  # Remove row_id and PTS from training data
+  train_data = train_data %>% select(-row_id, -PTS)
+  test_data = test_data %>% select(-row_id, -PTS)
+  
+  # Fit random forest
+  fit = ranger::ranger(
+    formula = MADE ~ .,
+    data = train_data, 
+    probability = TRUE,
+    importance = "permutation")
+  
+  # Get predictions (probability of made shot)
+  train_preds = predict(object = fit, data = train_data)$predictions[,2]
+  test_preds = predict(object = fit, data = test_data)$predictions[,2]
+  
+  # Calculate log loss
+  train_logloss[r] = logloss(made_train, train_preds)
+  test_logloss[r] = logloss(made_test, test_preds)
+  
+  full_data = shots_2025_forest %>% select(-row_id, -PTS)
+  
+  # Apply model to entire data set
+  full_data_predictions = predict(object = fit, data = full_data)$predictions[,2]
+  
+  # Produce data set with probabilities and if the shot was made
+  shots_2025_with_predicted_shots = shots_2025 %>% mutate(
+    PREDICTED_PROB_MADE = full_data_predictions,
+    PREDICTED_MADE = ifelse(full_data_predictions > 0.5, 1, 0),
+  )
+}
+
+
+cat("RandomForest training logloss:", round(mean(train_logloss), digits = 4), "\n")
+cat("RandomForest testing logloss:", round(mean(test_logloss), digits = 4), "\n")
+shots_2025_with_predicted_shots
+```
+
+
+```{r}
+View(shots_2025_with_predicted_shots)   
+```
+
+```{r}
+save(shots_2025_with_predicted_shots, file = "shots_2025_with_predicted_shots.Rda")
+```
+
+
+```{r}
+save(shots_2025_with_predicted_shots, file = "shots_2025_with_predicted_shots.Rda")
+```
+
+
+
+```{r}
+selected = shots_2025_with_predicted_shots %>% select(PLAYER_NAME, SHOT_TYPE, SHOT_MADE_FLAG, PTS, PREDICTED_PROB_MADE, PREDICTED_MADE)
+selected
+```
+
+```{r}
+misclass(selected$SHOT_MADE_FLAG, selected$PREDICTED_MADE)
+```
+
+```{r}
+wrong = selected %>% filter(SHOT_MADE_FLAG != PREDICTED_MADE)
+nrow(wrong)/nrow(selected)
+```
+
+
+```{r}
+fit
+```
+
+
+
+
+```{r}
+shots_2025_with_predicted_shots = shots_2025_with_predicted_shots %>%  mutate(EXPECTED_POINTS = case_when(
+  SHOT_TYPE == "2PT Field Goal" ~ PREDICTED_PROB_MADE * 2, 
+  SHOT_TYPE == "3PT Field Goal" ~ PREDICTED_PROB_MADE * 3,
+  TRUE ~ 0
+))
+```
+
+```{r}
+shots_2025_with_predicted_shots
+```
+
+```{r}
+outliers = shots_2025_with_predicted_shots %>% arrange(desc(EXPECTED_POINTS)) %>% filter(SHOT_MADE_FLAG == 1, SHOT_TYPE == "2PT Field Goal", PREDICTED_PROB_MADE >= 0.9)
+outliers
+```
+
+```{r}
+c(sum(shots_2025_with_predicted_shots$PTS), sum(shots_2025_with_predicted_shots$EXPECTED_POINTS))
+```
+
+
+```{r}
+fit
+```
+
+
+```{r}
+fit
+saveRDS(fit, file = "nba_shot_model_2025.rds")
+```
+
+
+```{r}
+sum(shots_2025_with_predicted_shots$PTS) - sum(shots_2025_with_predicted_shots$EXPECTED_POINTS)
+```
+
+
+Here we evaluate the performance of each feature in the Random Forest Model.
+
+```{r}
+importance = fit$variable.importance
+importance_frame = data.frame(
+  Variable = names(importance),
+  Importance = as.numeric(importance)
+)
+importance_frame_scaled = importance_frame %>% mutate(Importance = Importance * 100) %>% arrange(desc(Importance))
+importance_frame_scaled
+```
+
+```{r}
+ggplot(importance_frame, aes(x = reorder(Variable, Importance), y = Importance), fill = Importance) + geom_bar(stat = "identity") + coord_flip() + labs(x = "Feature Importance", y = "Variable")
+```
+
+
+### Application to the Problem
+
+
+
+```{r}
+players_stats = shots_2025_with_predicted_shots %>% group_by(PLAYER_NAME) %>% summarize(
+  TOTAL_POINTS = sum(PTS),
+  EXPECTED_TOTAL_POINTS = sum(EXPECTED_POINTS))
+players_stats
+```
+
+
+
+
+
+
+```{r}
+team_offensive_stats = shots_2025_with_predicted_shots %>% group_by(TEAM_NAME) %>% summarize(
+  TOTAL_POINTS = sum(PTS),
+  EXPECTED_TOTAL_POINTS = sum(EXPECTED_POINTS),
+  FGA = n(),
+  POINTS_PER_100 = (TOTAL_POINTS/FGA) * 100,
+  EXPECTED_POINTS_PER_100 = (EXPECTED_TOTAL_POINTS/FGA) * 100
+  )
+
+team_defensive_stats = shots_2025_with_predicted_shots %>% group_by(OPPOSING_TEAM_NAME) %>% summarize(
+  TOTAL_POINTS_ALLOWED = sum(PTS),
+  EXPECTED_TOTAL_POINTS_ALLOWED = sum(EXPECTED_POINTS),
+  FGA_ALLOWED = n(), 
+  POINTS_PER_100_ALLOWED = (TOTAL_POINTS_ALLOWED/FGA_ALLOWED) * 100,
+  EXPECTED_POINTS_PER_100_ALLOWED = (EXPECTED_TOTAL_POINTS_ALLOWED/FGA_ALLOWED) * 100
+)
+team_stats = team_offensive_stats %>% left_join(team_defensive_stats, by = c("TEAM_NAME" = "OPPOSING_TEAM_NAME"))
+team_stats = team_stats %>% mutate(
+  POINTS_DIFFERENCE = TOTAL_POINTS - TOTAL_POINTS_ALLOWED,
+  EXPECTED_POINTS_DIFFERENCE = EXPECTED_TOTAL_POINTS - EXPECTED_TOTAL_POINTS_ALLOWED,
+  PER_100_DIFFERENCE = POINTS_PER_100 - POINTS_PER_100_ALLOWED,
+  EXPECTED_PER_100_DIFFERENCE = EXPECTED_POINTS_PER_100 - EXPECTED_POINTS_PER_100_ALLOWED
+)
+team_stats
+```
+
+
+
+
+
+```{r}
+nba_standings <- tribble(
+  ~TEAM_NAME, ~W, ~L, ~WinPct,
+  "CLE", 64, 18, 0.780,
+  "BOS", 61, 21, 0.744,
+  "NYK", 51, 31, 0.622,
+  "IND", 50, 32, 0.610,
+  "MIL", 48, 34, 0.585,
+  "DET", 44, 38, 0.537,
+  "ORL", 41, 41, 0.500,
+  "ATL", 40, 42, 0.488,
+  "CHI", 39, 43, 0.476,
+  "MIA", 37, 45, 0.451,
+  "TOR", 30, 52, 0.366,
+  "BKN", 26, 56, 0.317,
+  "PHI", 24, 58, 0.293,
+  "CHA", 19, 63, 0.232,
+  "WAS", 18, 64, 0.220,
+  "OKC", 68, 14, 0.829,
+  "HOU", 52, 30, 0.634,
+  "LAL", 50, 32, 0.610,
+  "DEN", 50, 32, 0.610,
+  "LAC", 50, 32, 0.610,
+  "MIN", 49, 33, 0.598,
+  "GSW", 48, 34, 0.585,
+  "MEM", 48, 34, 0.585,
+  "SAC", 40, 42, 0.488,
+  "DAL", 39, 43, 0.476,
+  "PHX", 36, 46, 0.439,
+  "POR", 36, 46, 0.439,
+  "SAS", 34, 48, 0.415,
+  "NOP", 21, 61, 0.256,
+  "UTA", 17, 65, 0.207
+)
+nba_standings
+```
+
+
+```{r}
+team_stats_with_wins = left_join(team_stats, nba_standings, by = "TEAM_NAME") %>% mutate()
+team_stats_with_wins
+```
+
+```{r}
+team_residual_stats = team_stats %>% mutate(
+  TOTAL_POINTS_RESIDUAL = TOTAL_POINTS - EXPECTED_TOTAL_POINTS,
+  POINTS_PER_100_RESIDUAL = POINTS_PER_100 - EXPECTED_POINTS_PER_100,
+  TOTAL_POINTS_ALLOWED_RESIDUAL = TOTAL_POINTS_ALLOWED - EXPECTED_TOTAL_POINTS_ALLOWED,
+  POINTS_PER_100_ALLOWED_RESIDUAL = POINTS_PER_100_ALLOWED - EXPECTED_POINTS_PER_100_ALLOWED,
+  POINTS_DIFFERENCE_PER_100_RESIDUAL = PER_100_DIFFERENCE - EXPECTED_PER_100_DIFFERENCE) %>%  select(TEAM_NAME, TOTAL_POINTS_RESIDUAL, POINTS_PER_100_RESIDUAL, TOTAL_POINTS_ALLOWED_RESIDUAL, POINTS_PER_100_ALLOWED_RESIDUAL, POINTS_DIFFERENCE_PER_100_RESIDUAL)
+team_residual_stats
+```
+
+
+
+
+```{r}
+plot(team_stats_with_wins$WinPct, team_stats_with_wins$PER_100_DIFFERENCE - team_stats_with_wins$EXPECTED_PER_100_DIFFERENCE)
+```
+
+```{r}
+ggplot(team_residual_stats, aes(x = reorder(TEAM_NAME, POINTS_DIFFERENCE_PER_100_RESIDUAL), y = POINTS_DIFFERENCE_PER_100_RESIDUAL, fill = POINTS_DIFFERENCE_PER_100_RESIDUAL)) + geom_col() + coord_flip() + labs(x = "Residual Point Differential", y = "Team Name")
+```
+
+
+
+
+
+```{r}
+nba_standings = nba_standings %>% arrange(TEAM)
+cor(nba_standings$WinPct, team_stats$EXPECTED_POINTS_PER_100)
+cor(nba_standings$WinPct, team_stats$POINTS_PER_100)
+```
+```{r}
+plot(nba_standings$WinPct, team_stats$POINTS_PER_100)
+```
+
+
+
+
+```{r}
+shots_2025_with_predicted_shots
+```
+
+```{r}
+save(shots_2025_with_predicted_shots, file = "shots_2025_with_predicted_shots.Rda")
+```
+
+
+```{r}
+nba_pbp = hoopR::load_nba_pbp(seasons = 2025)
+free_throws = nba_pbp
+```
+
+```{r}
+save(shots_2025, file = "shots_2025.Rda")
+```
+
+```{r}
+team_scores = shots_2025_with_predicted_shots %>% 
+  group_by(GAME_ID, TEAM_NAME, OPPOSING_TEAM_NAME) %>% 
+  summarize(
+    TEAM_SCORE = sum(PTS),
+    EXPECTED_TEAM_SCORE = sum(EXPECTED_POINTS)
+  )
+opponent_scores = shots_2025_with_predicted_shots %>% 
+  group_by(GAME_ID, OPPOSING_TEAM_NAME) %>% 
+  summarize(
+    OPPOSING_TEAM_SCORE = sum(PTS),
+    EXPECTED_OPPOSING_TEAM_SCORE = sum(EXPECTED_POINTS)
+  )
+
+team_scores
+```
+
+```{r}
+team_scores <- shots_2025_with_predicted_shots %>%
+  group_by(GAME_ID, TEAM_NAME, OPPOSING_TEAM_NAME) %>%
+  summarise(
+    actual_score = sum(PTS, na.rm = TRUE),
+    expected_score = sum(EXPECTED_POINTS, na.rm = TRUE)
+  )
+team_scores
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# Assuming your data is called game_stats
+game_stats_wide <- team_scores %>%
+  arrange(GAME_ID, TEAM_NAME) %>%
+  pivot_wider(
+    id_cols = GAME_ID,
+    names_from = TEAM_NAME,
+    values_from = c(actual_score, expected_score),
+    names_sep = "_"
+  )
+game_stats_wide
+```
+
+
+
+
+### Limitations
+
+Although these models seem to track well with observed values, there are several considerable limitations that effect the potential output and applicability of the models.
+
+The foremost limitation of the model is the lack of inclusion concerning free throws. For the 2024-25 season, 13.9% of all points scored came from free throws, a significant area.
+
+Another consideration to be made is the amount of training and testing spits performed on the data set, as only a few validation could potentially lead to model bias and, However, given the enormous raw size of the data set, as well as there being an ample amount of shot data for each specific combination of shot, this problem is potentially less significant than it may seem.
+
+Thirdly, an important consideration arises in potential co-linearity among regressors. One important
+
+
+A final consideration when evaluating the efficacy of the previous models is a potential of important features that could contribute to expected points per shot. Consider the StatsBombR XG models from lecture, and variables such as the number of defenders between the goalpost, the angle to the goal, and the number of defenders near the shooter. This same logic is easily extended to basketball shot data, as the following features could potentially have an impact on expected points.
+
+  1) Number (if any) of defenders contesting the shot attempt
+  2) Distance of defenders hand to ball release point
+  3) Time Remaining on Shot Clock
+  4) Angle of shooter to basket on jump shots
+  5) Score Differential
+  
+For example, the models may not be able to differentiate between a wide-open 25 foot three point shot with 15 seconds left on the shot clock compared to an attempt covered by two players with 0.5 seconds on the clock. These predictors would likely produce tighter estimates of the true expected points value, and if they were included in the model, it's much more likely that teams that take shots associated with the "good" values of these categories would see a higher cumulative expected points total.
+
+
+### Conclusions 
+
+
