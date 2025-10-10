@@ -50,8 +50,6 @@ shots = shots %>%
 shots %>% 
   arrange(desc(SHOT_DISTANCE))
 ```
-
-
 ### Now I began constructing the Naive Binning and Averaging model, which estimates each shot's expected point value based on its distance and shot zone. I wanted to compare each team's actual scoring output against what they were expected to score,given league average efficiency for the same shot locations. First, I filtered out any observations missing shot distances and created a new variable, distance_ft, by floorig each distance to the nearest whole foot. This had to be made because I was not able to aggregate attempts with comparable difficutly if there was no converstion of continuous host distances into one foot bins. Next, I grouped all shots by distance_ft, SHOT_ZONE_BASIC, and SHOT_TYPE to calculate baseline performance metric for the entire league. Each combination of distance, zone, and type forms a bin that represents average shot value across the league. In league_average_2.0, the most important metric is expected_points_rule as it represnets how many points a average player would be expected to score per attempt from that spot on the floor. To estimate how each team should have performed, I merged these league average stats back into the shot level dataset. The left_join matches each individual shot to its corresponding league average expected points based on distance, zone, and type of shot. The new variable expected_goal assigns a model based expected value to every attempted shots of what the average player would have scored from that exact location. I then aggregated all shots at the team level to compare actual total and expected total. expected_points shows a sum of expected values from league averages, actual_points shows a actual points scored by the team, and residual shows the difference between actual performance and expected performance: positive = overperformed offensively, negative = underperformed offesnively. This allows a comparioson of offesnive execution against shot quality. The first graph, shows the bar plot raking NBA teams by their offesnive over or underperformance relative to the Native Binning model. Our model suggests that Teams with positive residuals(blue bars): Phoenix Suns, Denver Nuggets, and Sacramento Kings scored more than the model expected given their shots. This suggest these teams had elite shooting efficeincy. It also suggests that Teams with negative residuals(red bars): Toronto Raptors, Charlotte Hornets, and Portland Trail Blazers scored less than the model expected, this suggests that theset teams had poor shooting efficiency. The second graph showed each team's total expected points based on how many points the team would be expected to score it all shots were within league average efficiency. Teams like Atlanta Hawks, Memphis Grizzlies, and Houston Rockets produced the highest expected totals, indicating they made a lot of shots at efficient locations while teams like Charlotte Hornets and Philadelphhia 76ers made a lot of shots at inefficient locations. These plots provide a comprehensive view of offensive performance: shooting efficiency and shot selection. 
 
 ```{r}
@@ -105,7 +103,6 @@ ggplot(Expected_vs_Actual_2.0,
        y = "Expected Total Points")+
   theme_minimal()
 ```
-
 ### Now I wanted to apply Naive Binning and Averaging to the defensive side of the game. Instead of modeling how efficiently each team scores, my goal was to estimate how efficietnly each team defened: whether opponents score more or fewer points than expected given the quality of shots they take. I began by constructing a defesnive dataset from the shots_2025. I added variables that identifies which team was the opponent on each play. HTM and VTM identify the home and visitng teams for each shot. I created the variable called Oppponents to assign the opposing team tthat defened the shot. This allows each shot to be analyzed from the defender's perspective. Like in offense, I removed any missing distances and created one foot distance. I then computed league avearge defensive expectations by shot distance and type. These league averages represent the expected number of points opponents should score from each spot if all teams defended equally. To evaluate how well each team defended relative to league, I joined the league averages back to the shot level. Each shot now has an expected_goal value that represents what an average defedner would have allowed from that spot on the court. I then aggregated these values by defending team: expected_points_allowed shows how many points a team would have allowed if defending at league average efficiency, actual_points_allowed shows how many points the team's opponents actually scored, and residuals_allowed shows the difference between actual and expected points.Positive value means team had a worse than expected defense and negative value means team had a better than expected defense. The first graph shows which defense held opponents above or below league avearge expectations. Teams that had positie residuals(blue) like Utah Jazz, Sacramento Kings, and Golden State Warriors indiciate they had lots of below average defesnive execution that caused opponents to overperform their expected shot value. While teams that had negative residuals(red) like Oklahoma City Thunder, Cleveland Cavaliers, and Chicago Bulls had lots of above average defensive execution that caused opponents to underperform thier expected shot value. The second graph shows each team's total expected points allowed. Teams like Chicago Bulls, San Antonio Spurs, and New Oreleans Pelicans had highest expected totals allowed suggesting that they allowed opponents to take lots of high quality shot attempts. Meanwhile teams like Orlando Magic, Golden State Warriors and Brooklyn Nets had lowest expected totals allowed suggesting that they forced opponents to take lots of low quality shot attempts. These plots provide a comprehensive view of defensive performance: Defensive execution efficiency and Shot quality prevention. 
 
 ```{r}
@@ -176,8 +173,6 @@ ggplot(Expected_vs_Actual_defense,
   theme_minimal()
 
 ```
-
-
 ### Now I decided to merge offesnive and defensive metrics of teams to evaluate overall efficiency. By combining each team's expected and actual points scored with the corresponding expected and actual points allowed, we can obtain a measure of net performance realtive to league average shot quality. First, I decided to standarized team abbrevation so I can align the offense (Expected_vs_Actual_2.0) with defense (Expected_vs_Actual_defense) so there is no problem in the merge. Then I decided to merge offense and defense. expected_combined_points shows a expected points scored minus expected points allowed, actual_combined_points shows an actual points scored - actual points allowed, and residual_combined shows the difference(actual - expected) in net performance. Positive residual indiciates that a team outperformed its combined expectation, while negative residuals indicates that a team underperformed its combined expectation relative to league average shot quality. The first graph, shows the teams ranked by net residual points, summarzing whether each team's overall performance exceeded or fell below expectations. The teams with positive residuals(blue) are Oklahoma City Thunder, Cleveland Cavaliers, and Boston Celtics suggesting these teams have done greate job capitalizing shot opportuntities and protected shot opportuntities of opponents compared with league average expectation. The teams with negative residuals(red) are Charlotte Hornets, Washington Wizards, Portland Trailblazers suggesting theset teams have done poor job capitalzing shot opportunities or protected agaisnt shot opportunities compared with league average expectation. The second graph, shows expected combined points (expected points scored - expected points allowed). The teams with positive residuals(blue) like Oklahoma City Thunder, Houston Rockets, and Atlanta Hawks suggest that they generated efficient shots while forcing oppoentns to shoot inefficient shots. Meanwhile the teams with negative residuals(red) like Charlotte Hornets, Philadelphia 76ers, and New Orelans Pelicans suggest that the generated inefficient shots while allowing opponents to shoot efficient shots. 
 
 ```{r}
@@ -224,10 +219,8 @@ ggplot(Offense_and_Defense,
        x = "Team",
        y = "Expected Combined points")
 ```
-
-
-
 ### The purpose of this is to estimate each team's expected win percentage using the Pythagorean win model, which is based on the fundamental idea that teams who score more points and allow fewer points should win more games  on average. I decided to do this because I believed this is a way to transition from expected scroing efficiency I was able to get from Naive Binning into season performance expectation. The first two lines extract team level totals from expected points model. Expected_Offesne shows how many points each team was expected to score based on its shooting efficiency and Expected_Defense shows how many points each team was expected to allow based on opponent shooting outcomes. I knew that All NBA teams play 82 games but still decided to count the total number of games each team played in Games_per_team, in case of missing data. Then I calculated Pythagorean Win percentage by first joining the datas together and convert to per-game metrics where expected_points showed a expected points scored per game and expected_points_agaisnt showed expected points allowed per game. Then I mannualy wrote down Pythagoren formula and estimated season record. I rounded the numbers to be whole because actual NBA records are shown as whole number. 
+
 ```{r}
 
 Expected_Offense = Expected_vs_Actual_2.0 %>% 
@@ -251,11 +244,9 @@ pythagorean_win = pythagorean_win %>%
   mutate(expected_wins = round(expected_wins),
          expected_losses = round(expected_losses))
 ```
-
-
 ### Now to test how well the model's Pythagorean Win line up with actual win percentage from 2025 NBA season, I decided to evalute it using Brier Score and Log Loss. First I wrote down the formulas used to get the number for Brier score and Log Loss, then I joined predicitons to truth by creating true_win_percentage(from actual standings) and predicited_win_percentage(from Pythagorean Win). Then I computed Brier Score and Log Loss. Brier score was 0.0197 and Log Loss was 0.6812. 
-```{r}
 
+```{r}
 nba_standings = tribble(
   ~TEAM_NAME, ~W, ~L, ~WinPct,
   "CLE", 64, 18, 0.780,
@@ -290,10 +281,6 @@ nba_standings = tribble(
   "UTA", 17, 65, 0.207
 )
 
-
-
-
-
 brier = function(y, phat){
   return(mean((y-phat)^2))
 }
@@ -316,9 +303,6 @@ log_loss_season = log_loss(Comparison$true_win_percentage, Comparison$predicted_
 log_loss_season
 
 ```
-
-
-
 ### I decided to simulate game predicitons from the team level win probabilities estimated earlier with the Pythagorean Model. I wanted to conver the team level probabilities into several of simulated individual games, then measure how accruate model's implied probabilities would be if the season were replayed many times. First placed a random seed so random draws are replicable and I would get same sequence for my outcomes. Then I had to define my simulation function. uncount(games_per_team) is done to expand the data so each team has one simulated record per game. actual was done by rbinom to randomly simulate wins and losses according to each team's true win probability from the real standing. prediciton was done to predict win probabilties between 1e-12 and 1- 1e-12 to avoid errors. each_brier and each_log_loss computes the Brier and Log loss errors for every simulated game using the predicited probabilties. Then it returns the one mean Brier and mean Log loss score for that simulated run. Now to make it better I decided to repeat the simulation three times and bind the results together to smooth out randomness. Finally I computed the average Brier and average log loss across all runs, giving one stable prediciotn quality. Mean Brier was 0.245 and Mean Log Loss was 0.683. The tings to improve on: no free throw, treats all players and teams as equal within each shot zone (ex consider Stephen Curry and Ben Simmons having same chance at three point line), lots of context like shot clock, pressure,game situation is ignroed, same play style(don't consider different pace teams can have)
 
 ```{r}
