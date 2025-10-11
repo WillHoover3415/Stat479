@@ -1,0 +1,353 @@
+---
+title: "STAT 479 project codes"
+author: "Roy Son"
+date: "2025-10-07"
+output: html_document
+---
+
+### This part of the codes initializes the loads of all required packages for the later parts. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("hoopR")
+library("dplyr")
+library("tidyr")
+library("ggplot2")
+library(stringr)
+library(tictoc)
+library(devtools)
+library(pacman)
+```
+
+
+### The raw shots_2025 dataset contains all shot attempts from NBA players during the 2025 season. However, not all attributes were relevant to the predictive modeling objectives. To eliminate irrelevant attribute, I constructed a refined dataset called shots. shots retain only the key features required for analysis: PLYAER_NAME, TEAM_NAME, SHOT_DISTANCE, SHOT_TYPE, SHOT_ZONE_BASIC, PTS, and SHOT_MADE_FLAG. Then later team names were standardized to three letter abbreviations to ensure consistency across mutiple datasets used later in modeling. Shot distance was converted to numeric in order to prevent situations where 9 appearing before 25 in descending order because 25 comes before 9 alphabetically, causes confusion. Additonally, a new feature Points_rue was created to classify each attempt as 3 point, 2 point, or 0 point (missed shot). 
+
+
+```{r}
+shots_2025
+
+shots = shots_2025 %>%
+  select(PLAYER_NAME, TEAM_NAME, SHOT_DISTANCE, SHOT_TYPE, SHOT_ZONE_BASIC, PTS, SHOT_MADE_FLAG)
+
+Team_abbreviation = c( "Atlanta Hawks" = "ATL", "Boston Celtics" = "BOS", "Brooklyn Nets" = "BKN",
+  "Charlotte Hornets" = "CHA", "Chicago Bulls" = "CHI", "Cleveland Cavaliers" = "CLE",
+  "Dallas Mavericks" = "DAL", "Denver Nuggets" = "DEN", "Detroit Pistons" = "DET",
+  "Golden State Warriors" = "GSW", "Houston Rockets" = "HOU", "Indiana Pacers" = "IND",
+  "LA Clippers" = "LAC", "Los Angeles Lakers" = "LAL", "Memphis Grizzlies" = "MEM",
+  "Miami Heat" = "MIA", "Milwaukee Bucks" = "MIL", "Minnesota Timberwolves" = "MIN",
+  "New Orleans Pelicans" = "NOP", "New York Knicks" = "NYK", "Oklahoma City Thunder" = "OKC",
+  "Orlando Magic" = "ORL", "Philadelphia 76ers" = "PHI", "Phoenix Suns" = "PHX",
+  "Portland Trail Blazers" = "POR", "Sacramento Kings" = "SAC", "San Antonio Spurs" = "SAS",
+  "Toronto Raptors" = "TOR", "Utah Jazz" = "UTA", "Washington Wizards" = "WAS")
+
+shots = shots %>%
+  mutate(SHOT_DISTANCE = as.numeric(SHOT_DISTANCE),
+         team_abbreviation = Team_abbreviation[TEAM_NAME],
+         Points_rule = case_when(
+           SHOT_MADE_FLAG == 1 & SHOT_TYPE == "3PT Field Goal" ~ 3,
+           SHOT_MADE_FLAG == 1 & SHOT_TYPE == "2PT Field Goal" ~ 2,
+           TRUE ~ 0
+         ))
+
+shots %>% 
+  arrange(desc(SHOT_DISTANCE))
+```
+
+
+### To evaluate team level offensive efficiency, I implemented a Naive Binning and Averaging model, which estimates the expected point value of each shot based on its distance and shot zone. First in shots_by_ft, all observations missing SHOT_DISTANCE were filtered out, and a new variable distance_ft was created by flooring each shot distance to the nearest whole foot. This step was necessary because aggregating shot attempts at a continuous scale would make it difficult to compare attempts of similar difficulty. By converting to one-foot each, it standardizes those groupings. Next in league_average_2.0, all shots were grouped by distance_ft, SHOT_ZONE_BASIC, and SHOT_TYPE to calculate league wide baseline metrics. Each unique combination of these three characteristics defined one specific category, representing an average shot percentage in that area across the league. league_average_2.0 contains several important summary variables, with the most important being expected_points_league. expected_points_league measures how many points an average player would be expected to score per attempt from that category. After computing the league averages, I merged this dataset back into the shot level dataset called scored_shots_2.0. Left join operation assigns each shot an expected_goal. expected_goal represents what a league average player would be expected to score from that specific location. Lastly in dataset Expected_vs_Actual_2.0, I was able to aggregate these expected values at the team level producing a direct comaprison between expected total points and actual total points. I then computed residuals (actual_points - expected_points) to quantify each team's offesnive over or underperformance relative to league averages. For the first graph, it ranks NBA teams based on their offensive residuals: difference between actual and expected total points score per team. The results suggest that the team with positive residuals (blue) like Pheonix Suns and Denver Nuggets overperformed league expectations. This result potentially indicate that, these teams were able to score a lot more than an average team would have due to their elite shooting efficiency. On the other hand, teams with negative residuals (red) like Toronto Raptors and Charlotte Horents underperformed league expectations. This result potentially indicate that, these teams scored a lot less than an avereage team would have due to their poor shooting efficiency. For the second graph, it shows the total expected points per team:how much team should have scored based purely on shot locations and league average efficency. The results suggest that the teams like Atlanta Hawks and Memphis Grizzlies appear the top, indiciating they generted a large number of shots at efficient shot locations. In contrast, teams like Charlotte Hornets and appear near the botom, indicating they generated a large of number of shots at inefficient shot locations.
+```{r}
+
+
+shots_by_ft = shots %>%
+  filter(!is.na(SHOT_DISTANCE)) %>%
+  mutate(distance_ft = floor(SHOT_DISTANCE))
+
+
+league_avearage_2.0 = shots_by_ft %>%
+  group_by(distance_ft, SHOT_ZONE_BASIC, SHOT_TYPE)%>%
+  summarize(
+    attempt_league = n(),
+    made_shots_league = sum(SHOT_MADE_FLAG == 1, na.rm = TRUE),
+    fg_percentage_league = attempt_league / made_shots_league, 
+    expected_points_league = mean(Points_rule, na.rm = TRUE)
+  )
+  
+scored_shots_2.0 = shots_by_ft %>%
+  left_join(league_avearage_2.0 %>%
+              select(distance_ft, SHOT_ZONE_BASIC, SHOT_TYPE, expected_points_league),
+            by = c("distance_ft", "SHOT_ZONE_BASIC", "SHOT_TYPE")) %>%
+  mutate(expected_goal = expected_points_league)
+
+Expected_vs_Actual_2.0 = scored_shots_2.0 %>%
+  group_by(TEAM_NAME)%>%
+  summarize( 
+    expected_points = sum(expected_goal, na.rm = TRUE),
+    actual_points = sum(Points_rule, naa.rm = TRUE),
+    number_of_shots = n(),
+    .groups = "drop"
+  )%>%mutate(residual = actual_points - expected_points)
+
+ggplot(Expected_vs_Actual_2.0,
+       aes(x = reorder(TEAM_NAME, residual),
+           y = residual,
+           fill = residual > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Offensive Risduals by Team",
+       x = "Teams", 
+       y = "Residual Points Scored")
+
+
+ggplot(Expected_vs_Actual_2.0,
+       aes(x = reorder(TEAM_NAME, expected_points),
+           y = expected_points,
+           fill = expected_points))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Expected Points Scored by Team",
+       x = "Teams",
+       y = "Total Expected Points")+
+  theme_minimal()
+```
+
+### To evaluate team level defesnive effiency, I also used the Naive Binning and Averaging model to analyze the defensive side of the game. This time instead of measuring how efficiently each team scores, the objective was to estimate how efficiently each team defneds. First in shots_defense, I constructed a defensive dataset from shots_2025 and included variables taht identify which team was the opponent on each play. The variables HTM(Home Team), VTM(Visiting Team) were used to create a new variable called Opponents. Opponents assign the defending team for each shot. This allowed each observation to be analyzed from the defensive perspective. Next, as done for the offesnive model, I filtered out observations missing SHOT_DISTANCE and created a new variable distance_Ft by flooring each shot distance to the nearest whole foot. In league_average_defesne, I grouped all shots by distance_ft and SHOT_TYPE to compute league wide defesnive expectations. Each combination of dstiance and shot type define one specific category, representing the average number of points an opponent should score from that area if all teams defended equally. expected_points_league measures how many points a league average defender would be expected to allowe per attempt from that category. After comptuing these league averages, I merged them back into the shot level dataset scored_shots_defense. The left join assigned each shot an expected_goal, representin the expected value of points that an average defense would have allowed from that location. Finally, I aggregated these value by defending team in the dataset Expected_vs_Actual_defense, which contains each team's expected_points_allowed, actual_points_allowed, and residuals_allowed. For the first graph, it ranks NBA teams by their defensive residuals: measure the difference between actual and expected points allowed. Teams with positive residuals(blue) such as the Utah Jazz and Sacramento Kings allowed opponents to score more than their expected number. This result potentially indicate that, these teams allowed more points than average team would have done due to their poor defensive execution. On the other hand, teams with negative residuals(red) such as Oklahoma City Thunder and Cleveland Cavaliers allowed opponets to score less than their expected number. This result potentially indicate that, these teams allowed less points than average team would have done due to their elite defensive execution. For the second graph, it shows the total expected points allowed by each team: how many points opponents were expected to score given the quality of shots they took. Teams like the Chicago Bulls and San Antonio Spurs rank neear the top, indiciating that they allowed opponents to shoot large amount of their shots at high quality locations. In contrast, teams like Orlando Magic and Golden State Warriors appear near the bottom, indicating that they forced opponents to shoot large amount of their shots at low quality locations. 
+
+
+```{r}
+shots_defense = shots_2025 %>%
+  select(GAME_ID, HTM, VTM, PLAYER_NAME, TEAM_NAME, SHOT_DISTANCE, SHOT_TYPE,
+         SHOT_ZONE_BASIC, SHOT_MADE_FLAG, PTS)%>%
+  mutate(
+    SHOT_DISTANCE = as.numeric(SHOT_DISTANCE),
+    Points_rule = case_when(
+      SHOT_MADE_FLAG == 1 & SHOT_TYPE == "3PT Field Goal" ~ 3,
+      SHOT_MADE_FLAG == 1 & SHOT_TYPE == "2PT Field Goal" ~ 2,
+      TRUE ~ 0
+         ),
+    team_abbreviation = Team_abbreviation[TEAM_NAME],
+    Opponents = case_when(
+      team_abbreviation == HTM ~ VTM,
+      team_abbreviation == VTM ~ HTM,
+      TRUE ~ NA_character_
+    ))
+
+shots_by_ft_defense = shots_defense%>%
+  filter(!is.na(SHOT_DISTANCE))%>%
+  mutate(distance_ft = floor(SHOT_DISTANCE))
+
+league_average_defense = shots_by_ft_defense %>%
+  group_by(distance_ft, SHOT_TYPE)%>%
+  summarize(
+    attempt_league = n(),
+    made_shots_league = sum(SHOT_MADE_FLAG == 1, na.rm = TRUE),
+    fg_percentage_league = attempt_league / made_shots_league, 
+    expected_points_league = mean(Points_rule, na.rm = TRUE)
+  )
+
+scored_shots_defense = shots_by_ft_defense %>%
+  left_join(league_average_defense %>%
+              select(distance_ft, SHOT_TYPE, expected_points_league),
+            by = c("distance_ft","SHOT_TYPE")) %>%
+  mutate(expected_goal = expected_points_league)
+
+Expected_vs_Actual_defense = scored_shots_defense %>%
+  group_by(Opponents)%>%
+  summarize(
+    expected_points_allowed = sum(expected_goal, na.rm = TRUE),
+    actual_points_allowed = sum(Points_rule, naa.rm = TRUE),
+    number_of_shots_faced = n(),
+    .groups = "drop"
+  )%>% mutate(residuals_allowed = actual_points_allowed - expected_points_allowed )
+
+
+ggplot(Expected_vs_Actual_defense,
+       aes(x = reorder(Opponents, residuals_allowed),
+           y = residuals_allowed,
+           fill = residuals_allowed > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Defensive Residuals by Team",
+       x = "Teams", 
+       y = "Residual Points Allowed")
+
+
+ggplot(Expected_vs_Actual_defense,
+       aes(x = reorder(Opponents, expected_points_allowed),
+           y = expected_points_allowed,
+           fill = expected_points_allowed))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Expected Points Allowed by Team",
+       x = "Teams",
+       y = "Total Expected Points Allowed")+
+  theme_minimal()
+
+```
+
+
+### To evaluate team level overall effiecny, I extended the Naive Binning and Averaging to combine both the offesnive and defensive perspectives into a single metric of net performance relatie to league average shot quality. The process begins by aligning the Expected_vs_Actual_2.0 and Expected_vs_Actual_defense. Because both datasets were created independently, I first standardized team abbreviatoins to ensure a merge between each team's offesnive and defensive records. This avoides mistmaches in naming and ensures that each team's offesnive output was correctly paired with its defensive statistics. Then I merged the two datasets into a combined table named Offense_and_Defense. This dataset integraetes the variables from both analyses. From these values, three combined metric were computed: expected_combined_points represent the net shot quality balance a team would have if it played at league average efficiency on both ends. actual_combined_points caputre the real net outcome and residual_combined measrue how much a team over or underperformed relative to its combined expectation. The first graph ranks NBA teams by their net residual points: measure whether team outperformed or underperformed relative to league average expectations on both sides of the ball. Teams with positive residuals (blue) such as Oklahoma City Thunder and Cleveland Cavaliers outperformed their met expectations. This result potentially indicate that, these teams scored a lot more than an average team would have due to their elite shooting efficiency while allowing less points than average team would have done due to their elite defensive execution. On the other hand, teams with negative residuals(red) such as Charlotte Hornets and Washington Wizards underperformed their net expectations. This result potentially indicate taht, these teams these teams scored a lot less than an avereage team would have due to their poor shooting efficiency while allowing more points than average team would have done due to their poor defensive execution. For the second graph it visualzied expected combined points: each team's ability to score and prevent scoring relative to the league average. Teams like Oklahoma City Thunder and Houston Rockets ranked near the top, indicating that these teams generated lots of shots at high quality efficiency  locations while forcing opponents to take lots of shots into low quality efficiency locations. In contrast, teams like Charlotte Hornets and Philadelphia 76ers ranked near the bottom, indiciating that these teams generated lots of shots at low quality efficiency locations while allowed opponents to take lots of shots at high quality efficiency locations. 
+```{r}
+Expected_vs_Actual_2.0 = Expected_vs_Actual_2.0 %>%
+  mutate(Team_abbreviation = Team_abbreviation[TEAM_NAME])
+
+
+Offense_and_Defense = Expected_vs_Actual_2.0 %>%
+  select(TEAM_NAME, Team_abbreviation,
+         expected_points_scored = expected_points,
+         actual_points_scored = actual_points,
+         resiudal_scored = residual)%>%
+  left_join(
+    Expected_vs_Actual_defense%>%
+      select(Opponents, 
+             expected_points_allowed,
+             actual_points_allowed,
+             residuals_allowed),
+    by = c("Team_abbreviation" = "Opponents")) %>%
+      mutate(
+        expected_combined_points = expected_points_scored - expected_points_allowed,
+        actual_combined_points = actual_points_scored - actual_points_allowed,
+        residual_combined = resiudal_scored - residuals_allowed
+      )
+  
+ggplot(Offense_and_Defense, 
+       aes(x = reorder(TEAM_NAME, residual_combined),
+           y = residual_combined, 
+           fill = residual_combined > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Net Team Performance Residuals",
+       x = "Teams",
+       y = "Net Residual Points")+
+  theme_minimal()
+
+ggplot(Offense_and_Defense, 
+       aes(x = reorder(TEAM_NAME, expected_combined_points),
+           y =  expected_combined_points,
+           fill = expected_combined_points))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Expected Net Points by Team",
+       x = "Teams",
+       y = "Expected Combined points")+
+  theme_minimal()
+```
+
+
+
+###To extend the analysis from expected scoring effiency to season level performance, I implemented PYthagoren Win Expecation model. The fundamental principle behind this model is that teams who score more points and allowe fewer points tend to win more games on average, and that the ratio of points scored to points allowed provides a strong predictor of overall success. The process began with construciton of two datasets derived from earlier models. Expected_Offense contains each team's total expected points scored while expected_Defense contains each team's total expected points allowed both being from the Naive Binning Model. To account for the number of games each team played, I constructed Games_per_team. While every NBA team is scheduled to play 82 games, I still decided to implement this to ensure preventing the case of missing records or irregularities from the data. Next, I merged these three datasets togehter by team abbreviation to form pythagorean_win. For the formula of Pythagorean Win, I used the formula baseball reference uses to construct baseball teams expected record. For interpretability, all results were rounded to whole numbers as NBA records are reported in interger form. The results of the Pythagorean Win were highly consistent with the earlier Expected Net Poins by Team graph from the combined offense and deffense. Teams such as the Oklahoma City Thunder and Houston Rockets ranked first and second in expected net points and ranked first and second in the pythagorean model, each projecting approximately 46 expected wins for the season. This happened because both metrics capture the same concept: teams generating more efficient scoring opportunities while preventing opponents doing that would natrually win more games. The result also shows that the net shot quality measured by Naive Binning and Averaging model translate into expected sucess over an 82 game season. 
+
+
+```{r}
+
+Expected_Offense = Expected_vs_Actual_2.0 %>% 
+  mutate(Team_abbreviation = Team_abbreviation[TEAM_NAME])%>% 
+  select(TEAM_NAME, Team_abbreviation, expected_points_scored = expected_points) 
+
+Expected_Defense = Expected_vs_Actual_defense %>% 
+  rename(Team_abbreviation = Opponents)%>% select(Team_abbreviation, expected_points_allowed) 
+
+Games_per_team = shots_2025 %>% 
+  select(TEAM_NAME, GAME_ID)%>% 
+  distinct()%>% 
+  count(TEAM_NAME, name = "games") 
+
+pythagorean_win = Expected_Offense %>% 
+  left_join(Expected_Defense, by = "Team_abbreviation")%>% 
+  left_join(Games_per_team, by = "TEAM_NAME")%>% 
+  mutate(expected_points = expected_points_scored / games, expected_points_against = expected_points_allowed / games, pythagorean_win_percentage = (expected_points^1.83) / ((expected_points^1.83)+(expected_points_against^1.83)), expected_wins = pythagorean_win_percentage * games, expected_losses = games - expected_wins)
+
+pythagorean_win = pythagorean_win %>%
+  mutate(expected_wins = round(expected_wins),
+         expected_losses = round(expected_losses))
+
+pythagorean_win %>%
+  arrange(desc(expected_wins))%>%
+  select(TEAM_NAME, pythagorean_win_percentage, expected_wins, expected_losses)
+  head(10)
+```
+
+
+### To asses how well the Pythagorean Win Expectation model aligned with actual team outcomes from the 2025 NBA season, I evaluted its preditive accuracy using two scoring metrics: Brier Score and Log Loss. Both measues quantify the distance between predicted probabilities and true binary outcomes, where lower value indicates higher predictive accuracy.Brier Score measures the mean squared error between the predicted win probability and the actual outcome. Log loss penalizes incorrect predictions heavily. For both metrics I used the formula from Professor Deshpande's lecture 3: Estimating XG. The evaluation began by joining the predicted win probabilities from Pythagorean model with true win percetnages from offical 2025 NBA standings. This produced the dataset "Comparison". To simulate how the model's probabilities would behave in season setting, I defined a function simulate_score() that: expanded the team level probabilities into individual simulated games using uncount(games_per_team = 82) so that each team had one simulated record per scheduled game. rbinom() to generate random win/loss outcomees based on true win probabilities and calcualte per game Brier and Log loss erros using each team's predicted win probability. Then averaged those errors across all simulated games. To reduce errors, I repeated this process three times and averaged the results. The model showed a mean Brier Score of 0.24 and a mean Log Loss of 0.683. These suggest that the pythagorean model I created using Naive Binning and Averaging provides a reasonable approximation of team success, but its accuracy is not great compared to other statistical models our group later used. To conclude, the results showed that the Pythagorean win effectively captured overall performance trends. For instance, Oklahoma City Thunder and Houston Rockets ranked among the top teams in both predicted and actual win percentages. This alignemnt confirms that scoring and defending efficiencies dervied from the Naive Binning and Averaging meaningfully transalte into season level sucess. However, the Brier score and Log Loss results indicate tha the model still lacks the precision needed to fully capture he complexities of NBA game outcomes. Missing contextual factors such as free throws, variations in player skills, and difference in posession, combined with the inherent limitations of the Naive Binning(simplicity, inability to model continuous or nonlinear relationships, and failure to account for interactions between variables like offense and defense) highlight areas for improvment in future modeling. 
+```{r}
+
+nba_standings = tribble(
+  ~TEAM_NAME, ~W, ~L, ~WinPct,
+  "CLE", 64, 18, 0.780,
+  "BOS", 61, 21, 0.744,
+  "NYK", 51, 31, 0.622,
+  "IND", 50, 32, 0.610,
+  "MIL", 48, 34, 0.585,
+  "DET", 44, 38, 0.537,
+  "ORL", 41, 41, 0.500,
+  "ATL", 40, 42, 0.488,
+  "CHI", 39, 43, 0.476,
+  "MIA", 37, 45, 0.451,
+  "TOR", 30, 52, 0.366,
+  "BKN", 26, 56, 0.317,
+  "PHI", 24, 58, 0.293,
+  "CHA", 19, 63, 0.232,
+  "WAS", 18, 64, 0.220,
+  "OKC", 68, 14, 0.829,
+  "HOU", 52, 30, 0.634,
+  "LAL", 50, 32, 0.610,
+  "DEN", 50, 32, 0.610,
+  "LAC", 50, 32, 0.610,
+  "MIN", 49, 33, 0.598,
+  "GSW", 48, 34, 0.585,
+  "MEM", 48, 34, 0.585,
+  "SAC", 40, 42, 0.488,
+  "DAL", 39, 43, 0.476,
+  "PHX", 36, 46, 0.439,
+  "POR", 36, 46, 0.439,
+  "SAS", 34, 48, 0.415,
+  "NOP", 21, 61, 0.256,
+  "UTA", 17, 65, 0.207
+)
+
+brier = function(y, phat){
+  return(mean((y-phat)^2))
+}
+
+log_loss = function(y, phat){
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+
+Comparison = pythagorean_win %>%
+  select(TEAM_NAME, Team_abbreviation, pythagorean_win_percentage) %>%
+  left_join(nba_standings, by = c("Team_abbreviation" = "TEAM_NAME"))%>%
+  rename(true_win_percentage = WinPct, predicted_win_percentage = pythagorean_win_percentage)
+
+Set.seed(5)
+
+simulate_score = function(df, games_per_team = 82){
+  game_level = df %>%
+    tidyr::uncount(games_per_team) %>%
+    mutate(actual = rbinom(n(), size = 1, prob = true_win_percentage),
+           prediction = pmin(pmax(predicted_win_percentage, 1e-12),1-1e-12),
+           each_brier = (prediction-actual)^2,
+           each_log_loss = -(actual * log(prediction)+(1-actual)* log(1-prediction))
+           )
+  tibble(mean_brier = mean(game_level$each_brier),
+         mean_log_loss = mean(game_level$each_log_loss))}
+
+results = bind_rows(
+  simulate_score(Comparison),
+  simulate_score(Comparison),
+  simulate_score(Comparison))
+
+results %>% summarize(average_brier = mean(mean_brier),
+                      average_log_loss = mean(mean_log_loss))
+
+```
+
+
+
+
+
+
+
+
+
+
