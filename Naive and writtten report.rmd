@@ -1,0 +1,281 @@
+---
+title: "STAT 479 project codes"
+author: "Roy Son"
+date: "2025-10-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("hoopR")
+library("dplyr")
+library(stringr)
+library(tictoc)
+library(devtools)
+library(pacman)
+```
+
+```{r}
+shots = shots_2025 %>%
+  select(PLAYER_NAME, TEAM_NAME, SHOT_DISTANCE, SHOT_TYPE, SHOT_ZONE_BASIC, PTS, SHOT_MADE_FLAG)
+```
+
+###codes for total expected points by team 
+```{r}
+Team_abbreviation = c( "Atlanta Hawks" = "ATL", "Boston Celtics" = "BOS", "Brooklyn Nets" = "BKN",
+  "Charlotte Hornets" = "CHA", "Chicago Bulls" = "CHI", "Cleveland Cavaliers" = "CLE",
+  "Dallas Mavericks" = "DAL", "Denver Nuggets" = "DEN", "Detroit Pistons" = "DET",
+  "Golden State Warriors" = "GSW", "Houston Rockets" = "HOU", "Indiana Pacers" = "IND",
+  "LA Clippers" = "LAC", "Los Angeles Lakers" = "LAL", "Memphis Grizzlies" = "MEM",
+  "Miami Heat" = "MIA", "Milwaukee Bucks" = "MIL", "Minnesota Timberwolves" = "MIN",
+  "New Orleans Pelicans" = "NOP", "New York Knicks" = "NYK", "Oklahoma City Thunder" = "OKC",
+  "Orlando Magic" = "ORL", "Philadelphia 76ers" = "PHI", "Phoenix Suns" = "PHX",
+  "Portland Trail Blazers" = "POR", "Sacramento Kings" = "SAC", "San Antonio Spurs" = "SAS",
+  "Toronto Raptors" = "TOR", "Utah Jazz" = "UTA", "Washington Wizards" = "WAS")
+
+shots = shots %>%
+  mutate(SHOT_DISTANCE = as.numeric(SHOT_DISTANCE),
+         team_abbreviation = Team_abbreviation[TEAM_NAME],
+         Points_rule = case_when(
+           SHOT_MADE_FLAG == 1 & SHOT_TYPE == "3PT Field Goal" ~ 3,
+           SHOT_MADE_FLAG == 1 & SHOT_TYPE == "2PT Field Goal" ~ 2,
+           TRUE ~ 0
+         ))
+
+shots %>% 
+  arrange(desc(SHOT_DISTANCE))
+
+shots_by_ft = shots %>%
+  filter(!is.na(SHOT_DISTANCE)) %>%
+  mutate(distance_ft = floor(SHOT_DISTANCE))
+
+league_average = shots_by_ft %>%
+  group_by(distance_ft, SHOT_TYPE)%>%
+  summarize(
+    attempt_league = n(),
+    made_shots_league = sum(SHOT_MADE_FLAG == 1, na.rm = TRUE),
+    fg_percentage_league = attempt_league / made_shots_league, 
+    expected_points_league = mean(Points_rule, na.rm = TRUE)
+  )
+
+scored_shots = shots_by_ft %>%
+  left_join(league_average %>%
+              select(distance_ft, SHOT_TYPE, expected_points_league),
+            by = c("distance_ft", "SHOT_TYPE"))%>%
+  mutate(expected_goal = expected_points_league)
+
+Expected_vs_Actual = scored_shots %>%
+  group_by(TEAM_NAME)%>%
+  summarize(
+    expected_points = sum(expected_goal, na.rm = TRUE),
+    actual_points = sum(Points_rule, naa.rm = TRUE),
+    number_of_shots = n(),
+    .groups = "drop"
+  )%>%mutate(residual = actual_points - expected_points)
+
+
+ggplot(Expected_vs_Actual,
+       aes(x = reorder(TEAM_NAME, residual),
+           y = residual,
+           fill = residual > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Residuals(Actual - Expected) by Team",xlab = "Team", ylab = "Residual Points")
+
+
+ggplot(Expected_vs_Actual,
+       aes(x = reorder(TEAM_NAME, expected_points),
+           y = expected_points,
+           fill = expected_points))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Total Expected Points by Team",
+       x = "Team",
+       y = "Expected Total Points")+
+  theme_minimal()
+  
+```
+
+
+###just added Shot Zone Basic from the previeous version. 
+```{r}
+league_avearage_2.0 = shots_by_ft %>%
+  group_by(distance_ft, SHOT_ZONE_BASIC, SHOT_TYPE)%>%
+  summarize(
+    attempt_league = n(),
+    made_shots_league = sum(SHOT_MADE_FLAG == 1, na.rm = TRUE),
+    fg_percentage_league = attempt_league / made_shots_league, 
+    expected_points_league = mean(Points_rule, na.rm = TRUE)
+  )
+  
+scored_shots_2.0 = shots_by_ft %>%
+  left_join(league_avearage_2.0 %>%
+              select(distance_ft, SHOT_ZONE_BASIC, SHOT_TYPE, expected_points_league),
+            by = c("distance_ft", "SHOT_ZONE_BASIC", "SHOT_TYPE")) %>%
+  mutate(expected_goal = expected_points_league)
+
+Expected_vs_Actual_2.0 = scored_shots_2.0 %>%
+  group_by(TEAM_NAME)%>%
+  summarize( 
+    expected_points = sum(expected_goal, na.rm = TRUE),
+    actual_points = sum(Points_rule, naa.rm = TRUE),
+    number_of_shots = n(),
+    .groups = "drop"
+  )%>%mutate(residual = actual_points - expected_points)
+
+ggplot(Expected_vs_Actual_2.0,
+       aes(x = reorder(TEAM_NAME, residual),
+           y = residual,
+           fill = residual > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Residuals(Actual - Expected) by Team",xlab = "Team", ylab = "Residual Points")
+
+
+ggplot(Expected_vs_Actual_2.0,
+       aes(x = reorder(TEAM_NAME, expected_points),
+           y = expected_points,
+           fill = expected_points))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Total Expected Points by Team",
+       x = "Team",
+       y = "Expected Total Points")+
+  theme_minimal()
+```
+
+###For Expected defense 
+```{r}
+Team_abbreviation = c( "Atlanta Hawks" = "ATL", "Boston Celtics" = "BOS", "Brooklyn Nets" = "BKN",
+  "Charlotte Hornets" = "CHA", "Chicago Bulls" = "CHI", "Cleveland Cavaliers" = "CLE",
+  "Dallas Mavericks" = "DAL", "Denver Nuggets" = "DEN", "Detroit Pistons" = "DET",
+  "Golden State Warriors" = "GSW", "Houston Rockets" = "HOU", "Indiana Pacers" = "IND",
+  "LA Clippers" = "LAC", "Los Angeles Lakers" = "LAL", "Memphis Grizzlies" = "MEM",
+  "Miami Heat" = "MIA", "Milwaukee Bucks" = "MIL", "Minnesota Timberwolves" = "MIN",
+  "New Orleans Pelicans" = "NOP", "New York Knicks" = "NYK", "Oklahoma City Thunder" = "OKC",
+  "Orlando Magic" = "ORL", "Philadelphia 76ers" = "PHI", "Phoenix Suns" = "PHX",
+  "Portland Trail Blazers" = "POR", "Sacramento Kings" = "SAC", "San Antonio Spurs" = "SAS",
+  "Toronto Raptors" = "TOR", "Utah Jazz" = "UTA", "Washington Wizards" = "WAS")
+
+
+
+
+shots_defense = shots_2025 %>%
+  select(GAME_ID, HTM, VTM, PLAYER_NAME, TEAM_NAME, SHOT_DISTANCE, SHOT_TYPE,
+         SHOT_ZONE_BASIC, SHOT_MADE_FLAG, PTS)%>%
+  mutate(
+    SHOT_DISTANCE = as.numeric(SHOT_DISTANCE),
+    Points_rule = case_when(
+      SHOT_MADE_FLAG == 1 & SHOT_TYPE == "3PT Field Goal" ~ 3,
+      SHOT_MADE_FLAG == 1 & SHOT_TYPE == "2PT Field Goal" ~ 2,
+      TRUE ~ 0
+         ),
+    team_abbreviation = Team_abbreviation[TEAM_NAME],
+    Opponents = case_when(
+      team_abbreviation == HTM ~ VTM,
+      team_abbreviation == VTM ~ HTM,
+      TRUE ~ NA_character_
+    ))
+
+shots_by_ft_defense = shots_defense%>%
+  filter(!is.na(SHOT_DISTANCE))%>%
+  mutate(distance_ft = floor(SHOT_DISTANCE))
+
+league_average_defense = shots_by_ft_defense %>%
+  group_by(distance_ft, SHOT_TYPE)%>%
+  summarize(
+    attempt_league = n(),
+    made_shots_league = sum(SHOT_MADE_FLAG == 1, na.rm = TRUE),
+    fg_percentage_league = attempt_league / made_shots_league, 
+    expected_points_league = mean(Points_rule, na.rm = TRUE)
+  )
+
+scored_shots_defense = shots_by_ft_defense %>%
+  left_join(league_average_defense %>%
+              select(distance_ft, SHOT_TYPE, expected_points_league),
+            by = c("distance_ft","SHOT_TYPE")) %>%
+  mutate(expected_goal = expected_points_league)
+
+Expected_vs_Actual_defense = scored_shots_defense %>%
+  group_by(Opponents)%>%
+  summarize(
+    expected_points_allowed = sum(expected_goal, na.rm = TRUE),
+    actual_points_allowed = sum(Points_rule, naa.rm = TRUE),
+    number_of_shots_faced = n(),
+    .groups = "drop"
+  )%>% mutate(residuals_allowed = actual_points_allowed - expected_points_allowed )
+
+
+ggplot(Expected_vs_Actual_defense,
+       aes(x = reorder(Opponents, residuals_allowed),
+           y = residuals_allowed,
+           fill = residuals_allowed > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Residuals allowed(Actual - Expected) by Team",xlab = "Team", ylab = "Residual Points Allowed")
+
+
+ggplot(Expected_vs_Actual_defense,
+       aes(x = reorder(Opponents, expected_points_allowed),
+           y = expected_points_allowed,
+           fill = expected_points_allowed))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Total Expected Points allowed by Team",
+       x = "Team",
+       y = "Expected Total Points Allowed")+
+  theme_minimal()
+
+```
+
+
+###Expected Combined Points by Teams 
+```{r}
+Expected_vs_Actual_2.0 = Expected_vs_Actual_2.0 %>%
+  mutate(Team_abbreviation = Team_abbreviation[TEAM_NAME])
+
+
+Offense_and_Defense = Expected_vs_Actual_2.0 %>%
+  select(TEAM_NAME, Team_abbreviation,
+         expected_points_scored = expected_points,
+         actual_points_scored = actual_points,
+         resiudal_scored = residual)%>%
+  left_join(
+    Expected_vs_Actual_defense%>%
+      select(Opponents, 
+             expected_points_allowed,
+             actual_points_allowed,
+             residuals_allowed),
+    by = c("Team_abbreviation" = "Opponents")) %>%
+      mutate(
+        expected_combined_points = expected_points_scored - expected_points_allowed,
+        actual_combined_points = actual_points_scored - actual_points_allowed,
+        residual_combined = resiudal_scored - residuals_allowed
+      )
+  
+ggplot(Offense_and_Defense, 
+       aes(x = reorder(TEAM_NAME, residual_combined),
+           y = residual_combined, 
+           fill = residual_combined > 0))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Points Differences per 100 possesion residual",
+       x = "Team",
+       y = "Net Residual Points")+
+  theme_minimal()
+
+ggplot(Offense_and_Defense, 
+       aes(x = reorder(TEAM_NAME, expected_combined_points),
+           y =  expected_combined_points,
+           fill = expected_combined_points))+
+  geom_col()+
+  coord_flip()+
+  labs(title = "Total Expected Points difference by Teams",
+       x = "Team",
+       y = "Expected Combined points")
+```
+
+
+
+
+
