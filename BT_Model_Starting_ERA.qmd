@@ -1,0 +1,60 @@
+---
+title: "BT Model (Accounting for Starting Pitcher ERA)"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+devtools::install_github("hturner/BradleyTerry2")
+```
+
+First, we load in the dataframe.
+
+```{r}
+##Load in the games_with_pitchers df
+games_with_pitchers <- read.csv("games_with_pitchers.csv")
+```
+
+Next, we prepare the data for analysis.
+
+We derive new columns for at_home (indicator variable which signals whether team was playing at home) and pitcher_ERA (starting pitcher ERA).
+
+```{r}
+unik_teams <- sort(unique(c(games_with_pitchers$Home_Tm, games_with_pitchers$Away_Tm)))
+
+results <- games_with_pitchers %>% 
+  rename(home_team = Home_Tm, away_team = Away_Tm) %>% 
+  mutate(
+    home_team = factor(home_team, levels = unik_teams), 
+    away_team = factor(away_team,levels = unik_teams),
+    home_athome = 1,
+    away_athome = 0) %>% 
+  select(Date, game_id, home_team, away_team, Home_Winner, Away_Winner, home_athome, away_athome, Home_Pitcher_ERA, Away_Pitcher_ERA)
+  
+
+##Temp Dataframe
+tmp_df <- data.frame(Home_Winner = results$Home_Winner, Away_Winner = results$Away_Winner)
+
+##Home Dataframe appended to temp Dataframe
+tmp_df$home_team <- data.frame(team = results$home_team, athome = results$home_athome, pitcher_era = results$Home_Pitcher_ERA)
+
+##Away Dataframe appended to temp Dataframe
+tmp_df$away_team <- data.frame(team = results$away_team, athome = results$away_athome, pitcher_era = results$Away_Pitcher_ERA)
+```
+
+Model Fitting
+
+```{r}
+##Fitting Model to our Data
+fit <-
+  BradleyTerry2::BTm(
+    outcome = cbind(Home_Winner, Away_Winner),  
+    player1 = home_team, player2 = away_team,
+    formula = ~ team + athome + pitcher_era,
+    refcat = "BAL",
+    id = "team",
+    data = tmp_df) 
+
+summary(fit)
+```
