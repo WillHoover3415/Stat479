@@ -7,6 +7,7 @@ editor: visual
 ```{r}
 library(tidyverse)
 devtools::install_github("hturner/BradleyTerry2")
+library(BradleyTerry2)
 ```
 
 First, we load in the dataframe.
@@ -37,10 +38,18 @@ results <- games_with_pitchers %>%
 tmp_df <- data.frame(Home_Winner = results$Home_Winner, Away_Winner = results$Away_Winner)
 
 ##Home Dataframe appended to temp Dataframe
-tmp_df$home_team <- data.frame(team = results$home_team, athome = results$home_athome, pitcher_era = results$Home_Pitcher_ERA)
+tmp_df$home_team <- data.frame(team = results$home_team, at_home = results$home_athome, pitcher_era = results$Home_Pitcher_ERA)
 
 ##Away Dataframe appended to temp Dataframe
-tmp_df$away_team <- data.frame(team = results$away_team, athome = results$away_athome, pitcher_era = results$Away_Pitcher_ERA)
+tmp_df$away_team <- data.frame(team = results$away_team, at_home = results$away_athome, pitcher_era = results$Away_Pitcher_ERA)
+```
+
+```{r}
+summary(tmp_df$away_team["at_home"])
+```
+
+```{r}
+summary(tmp_df$home_team["at_home"])
 ```
 
 Model Fitting
@@ -48,13 +57,59 @@ Model Fitting
 ```{r}
 ##Fitting Model to our Data
 fit <-
-  BradleyTerry2::BTm(
+  BTm(
     outcome = cbind(Home_Winner, Away_Winner),  
     player1 = home_team, player2 = away_team,
-    formula = ~ team + athome + pitcher_era,
-    refcat = "BAL",
+    formula = ~ team + at_home + pitcher_era,
+    refcat = "BOS",
     id = "team",
     data = tmp_df) 
 
 summary(fit)
+```
+
+```{r}
+lambda_hat <- BTabilities(fit)
+lambda_home <- coef(fit)["at_home"]
+```
+
+```{r}
+##Home Win Prob
+Home_Win_Prob <- function(home_team, away_team, home_pitcher_era, 
+                          away_pitcher_era) {
+  diff_latent_strengths <- 
+    lambda_hat[home_team, "ability"] - lambda_hat[away_team, "ability"]
+  
+  diff_pitcher_eras <- (home_pitcher_era - away_pitcher_era)
+  
+  return(1/(1 + exp(-1 * (diff_latent_strengths + lambda_home + (diff_pitcher_eras*lambda_pitcher_era)))))
+}
+```
+
+```{r}
+brier <- function(y, phat){
+  return(mean( (y - phat)^2 ))
+}
+
+logloss <- function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+
+probs_df <- results %>% 
+  mutate(home_win_prob = Home_Win_Prob(home_team, away_team, Home_Pitcher_ERA, Away_Pitcher_ERA))
+
+brier(probs_df$Home_Winner, probs_df$home_win_prob)
+```
+
+```{r}
+logloss(probs_df$Home_Winner, probs_df$home_win_prob)
+```
+
+Simulations
+
+```{r}
+
 ```
