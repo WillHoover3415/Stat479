@@ -9,108 +9,59 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(baseballr)
 library(BradleyTerry2)
-```
-
-
-# Building main dataframe
-
-```{r}
-mil = as.data.frame(bref_team_results("MIL", 2024))
-mil
-```
-
-
-```{r}
-opponents = unique(mil$Opp)
-opponents
-```
-```{r}
-teams <- c("NYM", "MIN", "SEA", "CIN", "BAL", "SDP", "STL", "PIT", "NYY", "TBR", 
-           "CHC", "KCR", "HOU", "MIA", "BOS", "CHW", "PHI", "DET", "TOR", "LAA", 
-           "TEX", "COL", "LAD", "WSN", "ATL", "CLE", "OAK", "SFG", "ARI", "MIL")
-
-all_teams_df <- data.frame()  # initialize empty dataframe
-
-for(team in teams) {
-  team_data <- as.data.frame(bref_team_results(team, 2024))
-  all_teams_df <- rbind(all_teams_df, team_data)
-}
-```
-
-```{r}
-all_teams_df
+library(dplyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(colorr)
 ```
 
 
 
-```{r}
-all_teams_df = all_teams_df %>% mutate (Winner = ifelse(Result %in% c("W", "W-wo"), Tm, Opp), 
-                                        Loser = ifelse(Result %in% c("L", "L-wo"), Tm, Opp) )
-all_teams_df
-```
 
-```{r}
-save(all_teams_df, file = "all_teams_df.RData")
-```
+## Executive Report
 
 
+## Technical Report
 
-```{r}
-all_teams_df
-```
+### Question and Motivation
 
+When considering the outcome of any sporting event, whether that be an individual game, season, or championship match, it is natural to ask the following. Did the better team win? Although an overly broad and simple question, once can develop more nuance when considering a specific example. Consider the 2024 MLB and the following win totals
 
-```{r}
-# Keep only the unique teams, as each row is there twice, one for home perspective, one from away
-all_teams_df_unique <- all_teams_df %>%
-  rowwise() %>%
-  mutate(game_id = paste(sort(c(Tm, Opp)), collapse = "_")) %>%
-  ungroup() %>%
-  distinct(Date, game_id, .keep_all = TRUE) %>% relocate(Loser, .before = Result) %>% relocate(Winner, .after = Opp)
-all_teams_df_unique
-```
+![2024 MLB Standings]("C:\Users\willh\OneDrive\Documents\STAT 479\Project 2\2024mlbstandings.png")
+
+If we were to simulate this season a large amount of times, how often would the Dodgers have the most wins? How often would they finish in the top 5? Was their league leading 98 wins a fluke? Or were the Dodgers truly a dominant force? 
 
 
-```{r}
-unique(all_teams_df$Result)
-```
+Furthermore, let's consider the impact specific players and events have on the outcome. In recent times, the Dodgers were and are known for their staff of talented pitchers, including Clayton Kershaw, Tyler Glasnow, Blake Snell, Shohei Ohtani, and many more. Naturally, it is intuitive that if we were to assign numerical strength values to these players, how much impact would these pitchers have on the outcome of a game?
+
+This concept can be extended to a wide variety of outcomes, such as player salary, the specific batting order used, recent team performance, and many more. For this analysis, we will quantify the impact of the stan
 
 
-```{r}
-# Identify Home/Away Teams
-all_teams_df_unique = all_teams_df_unique %>% mutate(Home_Tm = ifelse(H_A == "H", Tm, Opp), Away_Tm = ifelse(H_A == "A", Tm, Opp), )
-all_teams_df_unique
-```
+One important thing to note for the remainder of this analysis is that there is a piece of missing data, this data being an incomplete game. This game took place between the Houston Astros and Cleveland Guardians on September 29, 2024. Following a lengthy rain delay, the game was cancelled and not re scheduled, due to the fact that neither team's playoff schedule would be affected by the outcome of said game. 
+[Read more here](https://www.reuters.com/sports/baseball/astros-guardians-finale-rained-out-wont-be-rescheduled--flm-2024-09-29/)
 
-```{r}
-# Identify if Home/Away Team Won
-all_teams_df_unique <- all_teams_df_unique %>%
-  mutate(
-    Home_Winner = ifelse(Winner == Home_Tm, 1, 0),
-    Away_Winner = ifelse(Winner == Away_Tm, 1, 0)
-  )
-```
+### Bradley Terry Modeling
+
+  
+
+### Data Construction and Cleaning
+
+One of the premier tasks of a data scientist is properly cleaning, pre-processing, and preparing data before any form of advanced analysis can be performed. Prep-processing and cleaning proved to be both a crucial and important part of the project, due to several key factors. 
+
+The primary source of difficulty was creating both a data set that contained both game log information such as home and visiting team, match outcome, in addition to the starting pitcher of each game, as no data set existed that consisted of all three. Thus, the task was to extract data containing information about each pitchers
 
 
-```{r}
-# Visualize how many runs are scored by the home/away team, rename winning/losing pitcher for confusion sake
-all_teams_df_unique = all_teams_df_unique %>%
-  mutate(
-    Home_Runs = ifelse(H_A == "H", R, RA),
-    Away_Runs = ifelse(H_A == "A", R, RA)
-  ) %>% rename(Win_Pitch = Win, Loss_Pitch = Loss)
-all_teams_df_unique
-```
-
-```{r}
-# Select only relevant variables
-game_log = all_teams_df_unique %>% select(Gm, Date, Home_Tm, Away_Tm, Home_Winner, Away_Winner, Home_Runs, Away_Runs, Winner, Loser, Win_Pitch, Loss_Pitch, Save, cLI)
-game_log
-```
+This concept is evaluated at a deeper level in the section describing Model 2, for now note that these pitching "strengths" were estimated and appended to each team.
 
 
-### ONLY DO THIS IF WE ACTUALLY NEED PITCH BY PITCH DATA, RUN ONCE THEN SAVE DATAFRAME
+Data incorporated in these was sourced from baseball-reference.com, and fangraphs.com through the `baseballr` package. 
 
+Unfortunately, we could not find a data frame formatted where every row was a game instance that contained information about both the game outcome and starting pitcher stats in a clean form, However, information was found for each subcategory, one for game results, and a second containing pitching information were recovered. Thus, a dataframe containing info about the results and pitchers for each game was created
+
+#### Game Logs 
+
+To faciliate in the scraping of web data, a Statcast helper function called `annual_statcast_query` was implemented.
 ```{r}
 ## Code modified from Bill Petti's original annual Statcast scraper:
 ## Main change is in the column names of the fielders
@@ -193,88 +144,650 @@ annual_statcast_query <- function(season) {
 ```
 
 
-```{r}
-raw_statcast2024 <- annual_statcast_query(2024)
-```
+Game logs were uncovered using the function `bref_team_results`, which scrapes individual game results for a specifc team for a specific season.
 
 ```{r}
-library(tidyverse)
-raw_statcast2024 <- annual_statcast_query(2024)
-save(raw_statcast2024, file = "raw_statcast2024.RData")
-```
-
-
-```{r}
-load("raw_statcast2024.RData")
+# Example for a single team
+mil = as.data.frame(bref_team_results("MIL", 2024))
+mil
 ```
 
 
-```{r}
-raw_statcast2024
-```
-
-
-
-
-
-
-# Hockey Testing for fitting BTM
-```{r}
-wd1hockey_2024_2025 <- readr::read_csv(file = "wd1hockey_2024_2025.csv")
-```
-
-
-
+Thus, information about every team is to be extracted. Here, we loop over every team and bind each team's games to a larger data frame.
 
 ```{r}
-wd1hockey_2024_2025 |>
-  dplyr::filter(HomeScore == OppScore) |>
-  dplyr::select(Opponent, OppScore, Home, HomeScore, Notes) |>
-  dplyr::slice_head(n=5)
-```
+teams = c("NYM", "MIN", "SEA", "CIN", "BAL", "SDP", "STL", "PIT", "NYY", "TBR", 
+           "CHC", "KCR", "HOU", "MIA", "BOS", "CHW", "PHI", "DET", "TOR", "LAA", 
+           "TEX", "COL", "LAD", "WSN", "ATL", "CLE", "OAK", "SFG", "ARI", "MIL")
 
-```{r}
-team_abbr <- readr::read_csv(file = "wd1hockey_teams.csv")
-```
+all_teams_df = data.frame()
 
-```{r}
-get_home_winner <- 
-  function(Home_abbr, HomeScore, Opp_abbr, OppScore, Notes)
-{
-  home_winner <- NA
-  if(HomeScore > OppScore) home_winner <- 1
-  else if(HomeScore < OppScore) home_winner <- 0
-  else{
-    if(!is.na(Notes) & grepl("SO", Notes)){
-      winner <- 
-        stringr::str_split(string = Notes, pattern = " wins")[[1]][1]
-      if(winner == Home_abbr) home_winner <- 1
-      else if(winner == Opp_abbr) home_winner <- 0
-    }
-  }
-  return(home_winner)
+for(team in teams) {
+  team_data = as.data.frame(bref_team_results(team, 2024))
+  all_teams_df = rbind(all_teams_df, team_data)
 }
 ```
 
+```{r}
+all_teams_df
+```
+
+
+Next, we determine which team won each game, as the initial data set only indicates if the particular team of interest won or lost.
 
 ```{r}
-wd1hockey_2024_2025 <-
-  wd1hockey_2024_2025 |>
-  dplyr::mutate(
-    HomeScore = as.integer(HomeScore),
-    OppScore = as.integer(OppScore)) |>
-  dplyr::left_join(y = team_abbr |> dplyr::rename(Home_abbr = abbr, Home = team),
-                   by = "Home") |>
-  dplyr::left_join(y = team_abbr |> dplyr::rename(Opp_abbr = abbr, Opponent = team),
-                   by = "Opponent") |>
-  dplyr::rowwise() |>
-  dplyr::mutate(
-    Home_Winner = 
-      get_home_winner(Home_abbr, HomeScore, Opp_abbr, OppScore, Notes)) |>
-  dplyr::ungroup() |>
-  dplyr::mutate(Opp_Winner = 1-Home_Winner)
+all_teams_df = all_teams_df %>% mutate (Winner = ifelse(Result %in% c("W", "W-wo"), Tm, Opp), 
+                                        Loser = ifelse(Result %in% c("L", "L-wo"), Tm, Opp) )
+all_teams_df
+```
+
+
+```{r}
+#Results are saved and loaded for easier retrieval throughout the data creation process.
+save(all_teams_df, file = "all_teams_df.RData")
+load("all_teams_df.RData")
+```
+
+One important thing to note is that since the process of retrieving game logs was repeated for every team in the league, this means that each game will appear twice. For example, the Opening Day match up between the Brewers and Mets appears twice. Once recording the outcome from the perspective of the Mets, and one for the Brewers.
+
+Next we clearly identify which team is home and away, as it is done so quite vaguely in the original data.
+
+```{r}
+# Identify Home/Away Teams
+all_teams_df = all_teams_df %>% mutate(Home_Tm = ifelse(H_A == "H", Tm, Opp), Away_Tm = ifelse(H_A == "A", Tm, Opp), )
+all_teams_df
+```
+
+
+To properly fit the Bradley Terry Model, information about whether the home team or away team won must be recorded.
+```{r}
+# Identify if Home/Away Team Won
+all_teams_df = all_teams_df %>%
+  mutate(
+    Home_Winner = ifelse(Winner == Home_Tm, 1, 0),
+    Away_Winner = ifelse(Winner == Away_Tm, 1, 0)
+  )
+```
+
+
+```{r}
+# Visualize how many runs are scored by the home/away team, rename winning/losing pitcher for confusion sake
+all_teams_df = all_teams_df %>%
+  mutate(
+    Home_Runs = ifelse(H_A == "H", R, RA),
+    Away_Runs = ifelse(H_A == "A", R, RA)
+  ) %>% rename(Win_Pitch = Win, Loss_Pitch = Loss)
+```
+
+At this point, only variables relevant to the Bradley Terry Model or potentially significant otherwise are included.
+
+```{r}
+# Select only relevant variables, assign each game an id
+game_log = all_teams_df %>% select(Gm, Date, Home_Tm, Away_Tm, Home_Winner, Away_Winner, Home_Runs, Away_Runs, Winner, Loser, Win_Pitch, Loss_Pitch, Save, cLI, Tm) %>% relocate(Gm, .after = cLI)
+game_log
+```
+
+
+Additionally, the date column was cleaned up as its values were in a non-standard format, as well as containing a numerical indicator if the game was part of a double header. This indicator was relocated to a new column so the date column could be standardized. 
+
+```{r}
+game_log = game_log %>%
+  mutate(
+    DoubleHeader = ifelse(str_detect(Date, "\\(2\\)"), 1, 0),
+    Date = str_remove(Date, " \\(1\\)| \\(2\\)")
+  ) %>% mutate(Date = mdy(paste(Date, "2024")))
+game_log
+```
+
+To properly join the two data sets, each game must be uniquely identified. Thus, it was decided to order each game in chronological order, and by each teams unique identifier listed below. This identifier was sourced from the second created data set about the pitching information.
+
+```{r}
+team_ids = c("CIN" = 18, "HOU" = 21, "SDP" = 29, "TBR" = 12, "OAK" = 10, 
+              "WSN" = 24, "BAL" = 2, "MIN" = 8, "PHI" = 26, "ARI" = 15, 
+              "CLE" = 5, "CHC" = 17, "KCR" = 7, "NYM" = 25, "TEX" = 13, 
+              "BOS" = 3, "CHW" = 4, "MIA" = 20, "LAA" = 1, "STL" = 28, 
+              "MIL" = 23, "LAD" = 22, "TOR" = 14, "SFG" = 30, "SEA" = 11, 
+              "PIT" = 27, "COL" = 19, "NYY" = 9, "ATL" = 16, "DET" = 6)
 ```
 
 ```{r}
-wd1hockey_2024_2025
+team_ids
 ```
+
+
+
+```{r}
+# Date converted into a numerical format for proper ordering
+game_log = as.data.frame(game_log %>% mutate(Date_String = as.Date(Date))) %>% 
+                          mutate(Date_Numeric = as.numeric(Date_String)) %>%
+                          mutate(teamid = team_ids[Tm]) %>% '
+                          arrange(Date_Numeric, teamid)
+game_log 
+```
+
+Data is saved for easier retrieval in case of errors
+
+```{r}
+save(game_log, file = "game_log.RData")
+```
+
+```{r}
+load("game_log.RData")
+```
+
+
+#### Pitchers
+
+
+Starting pitcher data was sourced from fangraphs.com, and all players who played in the 2024 season and their fangraphs id's we're extracted. If they were a pitcher, then their id would correspond to successful data using the function `fg_pitcher_game_logs(playerid = key, year = 2024)`. If not, the for loop skips over the id, and every successful id's data was appended to a larger data frame. 
+
+
+Ids were loaded from a library more complete than the Chadwick Register, as the Chadwick Register had a plethora of missing fan graph ids for many relevant players.
+
+```{r}
+sfbb = read.csv("C:/Users/willh/OneDrive/Documents/STAT 479/Project 2/SFBB-Player-ID-Map.csv")
+```
+
+```{r} 
+sfbb_keys = sfbb$IDFANGRAPHS
+```
+
+
+The ids from the updated baseball mapping library were extracted
+```{r}
+all_pitchers_df2 <- data.frame()
+
+for(key in sfbb_keys) {
+  tryCatch({
+    pitcher_data <- fg_pitcher_game_logs(playerid = key, year = 2024)
+    
+    if(!is.null(pitcher_data) && nrow(pitcher_data) > 0) {
+      pitcher_data$playerid <- key  # add identifier
+      all_pitchers_df2 <- bind_rows(all_pitchers_df2, pitcher_data)
+    }
+  }, error = function(e) {
+    message("Error with playerid ", key, ": ", e$message)
+  })
+}
+```
+
+```{r}
+all_pitchers_df2
+```
+
+
+```{r}
+save(all_pitchers_df2, file = "all_pitchers_df2.RData")
+```
+
+```{r}
+load("all_pitchers_df2.RData")
+```
+
+
+One massive setback associated with this method is that the library containing all the players had many missing values for only the fan graphs ids, an incredibly unfortunate circumstance. It was determined as the number of starts made in the run with just ids from the library was less than the total number of games played. 
+
+Thus, after the initial id looping, all the present starting pitcher data at the team level was examined and cross referenced to statistics on baseball reference.com to determine which pitchers were missing from the library. Then, the ids were retrieved manually from fan graphs for each missing player. 
+
+In total, 24 pitchers who had started a game in the 2024 season were missing a fan graphs id in the library. These "missing" ids and the initial set of ids were combined and the pitching data was thus retrieved for the super set, resulting in the correct number of pitching starts. 
+
+Starting pitchers were identified.
+```{r}
+starters_df2 = all_pitchers_df2 %>% filter(GS == 1)
+```
+
+Missing pitchers were identified here, as for this example, the data suggests that the Brewers only had 159 starts, 3 games shy of the 162 game season. 
+
+```{r}
+starters_df2 %>% filter(Team == "MIL")
+```
+
+This process of manually checking which players were missing was done for each team, and a tally of missing players was kept. ID's were then manually retrieved from the fan graphs website, a simple yet annoying task.
+
+Missing Teams: MIL: (good) 3, CHC: 1 (good), CIN: 7 (good), PHI: 1 )(good), MIA: 8 (good), SFG: 2 (good), COL: 1 (good), 
+               BOS: 3 (g), TOR: 4 (g), CHW: 4 (good), CLE: 2 (technically 1, good), DET: 3 (good), MIN: 1 (good), KCR: 1 (good)
+               LAA: 3 (g), TEX: 3 (good), HOU: 5 (technically 4, good), SEA: 1 (good)
+Missing Ids: 
+
+
+```{r}
+# One instance of " " turns the rest of the vector into character instances
+missing_ids = c("20298", 15094, 28036, 30031, 26020, 20038, 26034, 27910, 21241, 30226, 26952, 16835, 17536, 29823, 33834, 22304, 24094, 24607, 26443, 27624, 19835, 24977, 26190, 13652)
+missing_ids
+```
+
+The original and "missing" ids were combined, and the pitching stats extraction was performed for the total keys.
+
+```{r}
+combined_keys = c(sfbb_keys, missing_ids)
+```
+
+```{r}
+all_pitchers_df_final <- data.frame()
+
+for(key in combined_keys) {
+  tryCatch({
+    pitcher_data <- fg_pitcher_game_logs(playerid = key, year = 2024)
+    
+    if(!is.null(pitcher_data) && nrow(pitcher_data) > 0) {
+      pitcher_data$playerid <- key  # add identifier
+      all_pitchers_df_final <- bind_rows(all_pitchers_df_final, pitcher_data)
+    }
+  }, error = function(e) {
+    message("Error with playerid ", key, ": ", e$message)
+  })
+}
+```
+
+Minor spelling and formatting changes were made
+
+```{r}
+all_pitchers_df_final = all_pitchers_df_final %>% rename(Season = season, H_A = HomeAway)
+```
+
+When the team of interest was the away team, the other team would be marked with an @. This symbol was removed and re-formatted for uniformity amongst the data frames. 
+
+```{r}
+all_pitchers_df_final = all_pitchers_df_final %>% mutate(Opp = str_remove(Opp, "@"))
+```
+
+Home and away identification process as performed previously in the game logs section.
+
+```{r}
+all_pitchers_df_final = all_pitchers_df_final %>% mutate(Home_Tm = ifelse(H_A == "H", Team, Opp), Away_Tm = ifelse(H_A == "A", Team, Opp))
+all_pitchers_df_final
+```
+
+Sorting process as performed previously in the game logs section.
+
+```{r}
+all_pitchers_df_final = as.data.frame(all_pitchers_df_final %>% 
+                            mutate(Date_String = as.Date(Date))) %>%   
+                            mutate(Date_Numeric = as.numeric(Date_String)) %>%
+                            arrange(Date_Numeric, teamid)
+all_pitchers_df_final
+```
+
+
+```{r}
+save(all_pitchers_df_final, file = "all_pitchers_df_final.RData")
+```
+
+
+```{r}
+load("all_pitchers_df_final.RData")
+```
+
+
+Starting pitchers for the final run of the dataset were identified
+```{r}
+starting_pitchers_final = all_pitchers_df_final %>% filter(GS == 1)
+```
+
+Since `starting_pitchers_final` contains a ridiculous 365 columns, we only select relevant ones in preparation for the join. 
+```{r}
+starting_pitchers_final_short = starting_pitchers_final %>% select(PlayerName, playerid, Date, Opp, teamid, Season, H_A, ERA, Home_Tm, Away_Tm, Date_Numeric)
+starting_pitchers_final_short
+```
+
+
+
+
+
+```{r}
+save(starting_pitchers_final, file = "starting_pitchers_final.RData")
+```
+
+```{r}
+load("starting_pitchers_final.RData")
+```
+
+
+#### Merging the Dataframes 
+
+With two data frames of equal size, we are now ready to combine these two frames into one representative data frame. Each row in the frame represents a single game, with information about each team, the outcome of the game, the home and away team and pitchers, as well as E.R.A.'s of each pitcher. The challenge was devising a way to join the two data sets so that no data was lost. It was thus decided to break up the pitching data set into home and away pitchers, and then complete two seperate joins.
+
+
+```{r}
+home_pitchers = starting_pitchers_final_short %>%
+  filter(H_A == "H") %>%
+  arrange(Date_Numeric, Home_Tm) %>%
+  distinct(Date_Numeric, Home_Tm, .keep_all = TRUE) %>%
+  select(PlayerName, playerid, ERA, Date_Numeric, Home_Tm) %>%
+  rename(Home_Pitcher = PlayerName,
+         Home_Pitcher_ID = playerid,
+         Home_Pitcher_ERA = ERA)
+
+away_pitchers = starting_pitchers_final_short %>%
+  filter(H_A == "A") %>%
+  arrange(Date_Numeric, Away_Tm) %>%
+  distinct(Date_Numeric, Away_Tm, .keep_all = TRUE) %>%
+  select(PlayerName, playerid, ERA, Date_Numeric, Away_Tm) %>%
+  rename(Away_Pitcher = PlayerName,
+         Away_Pitcher_ID = playerid,
+         Away_Pitcher_ERA = ERA)
+
+# Join twice, once for the home pitchers, once for away
+game_log_with_pitchers = game_log %>%
+  left_join(home_pitchers, by = c("Date_Numeric", "Home_Tm")) %>%
+  left_join(away_pitchers, by = c("Date_Numeric", "Away_Tm"))
+```
+
+```{r}
+game_log_with_pitchers
+```
+
+As one might have noticed, throughout the data frame the same game appears twice. For example,  Thus, our final step is removing "duplicate" games, and this is done by simply selecting one instance of each game, in this case, where the home team is the team of interest corresponding to the original `game_log` dataset. Columns are selected in a way such that a desired order in which they appear occours.
+
+```{r}
+games_with_pitchers = game_log_with_pitchers %>%
+  filter(Tm == Home_Tm) %>%
+  arrange(Date_Numeric) %>%
+  mutate(game_id = row_number()) %>% select(Date, Home_Tm, Away_Tm, Home_Winner, Away_Winner, Winner, Loser, Home_Runs, Away_Runs, Home_Pitcher, Home_Pitcher_ERA, Home_Pitcher_ID, Away_Pitcher, Away_Pitcher_ERA, Away_Pitcher_ID, Win_Pitch, Loss_Pitch, Save, cLI, Gm, Tm, DoubleHeader, Date_String, Date_Numeric, game_id, teamid)
+
+games_with_pitchers = as.data.frame(games_with_pitchers)
+games_with_pitchers
+```
+
+
+The data was written as a CSV file for easier local storage and for convienent sharing between project teammates. This is the data that will be used to source the fitting of the covariates based on home field advantage, as well as pitcher strength.
+
+```{r}
+write.csv(games_with_pitchers, file = "C:/Users/willh/OneDrive/Documents/STAT 479/Project 2/games_with_pitchers.csv", row.names = FALSE )
+```
+
+
+```{r}
+games_with_pitchers = readr::read_csv(file = "C:/Users/willh/OneDrive/Documents/STAT 479/Project 2/games_with_pitchers.csv")
+```
+
+### Model 1: Standard Bradley Terry Model
+
+
+
+```{r}
+unique_teams = sort(unique(c(game_log$Home_Tm, game_log$Away_Tm)))
+
+all_matchups =
+  game_log %>% 
+  dplyr::group_by(Home_Tm, Away_Tm) %>% 
+  dplyr::summarise(
+    Home_Win = sum(Home_Winner),
+    Away_Win = sum(Away_Winner), .groups = 'drop') %>% 
+  dplyr::mutate(
+    Home_Tm = factor(Home_Tm, levels = unique_teams),
+    Away_Tm = factor(Away_Tm,levels = unique_teams))
+
+all_matchups
+```
+
+```{r}
+# Chicago Cubs are used as the reference team
+fit1 = BradleyTerry2::BTm(
+  outcome = cbind(Home_Win, Away_Win),
+  player1 = Home_Tm, player2 = Away_Tm,
+  refcat = "CHC",
+  data = all_matchups
+)
+lambda_hat1 = BradleyTerry2::BTabilities(fit1)
+lambda_hat1
+```
+
+```{r}
+lambda_frame = as.data.frame(lambda_hat1)
+lambda_frame$Team = rownames(lambda_frame)
+lambda_frame = lambda_frame %>% relocate(Team, .before = ability)
+lambda_frame
+```
+
+Now we must identify each home and each away team's lambda in the entire data set. We append them using the separated joins method employed previously. 
+
+```{r}
+home_lambdas = lambda_frame %>% 
+  select(Team, ability) %>% 
+  rename(Home_Tm = Team, Home_Ability = ability)
+home_lambdas
+
+away_lambdas = lambda_frame %>% 
+  select(Team, ability) %>% 
+  rename(Away_Tm = Team, Away_Ability = ability)
+away_lambdas
+
+games_with_pitchers_btm1 = games_with_pitchers %>% left_join(home_lambdas, by = "Home_Tm") %>% left_join(away_lambdas, by = "Away_Tm")
+games_with_pitchers_btm1
+```
+
+
+Theoretical win probabilities from the BTM are appended. 
+
+```{r}
+games_with_pitchers_btm1 = games_with_pitchers_btm1 %>% mutate(Home_Win_Prob = 1/(1 + exp(-1 * (Home_Ability - Away_Ability)))) %>% mutate(Away_Win_Prob = 1 - Home_Win_Prob)
+games_with_pitchers_btm1
+```
+
+
+Now to "simulate" a season, we must replicate a data frame for the number of seasons we wish to replicate. Due to computation time, only 100 simulations are completed, as it takes considerable time ro replicate each season. 
+
+To simulate a game using the theoretical probabilities, for each matchup we generate a random number between 0 and 1. If this number is higher than the BTM winning probability for the Home team, then the home team is awarded a victory, and the away team a loss.
+
+
+```{r}
+n_sims = 100
+
+simulation_results = replicate(n_sims, (games_with_pitchers_btm1 
+                               %>% mutate(
+                      random_number = runif(n()), 
+                      Home_Simulated_Win = ifelse(Home_Win_Prob > random_number, 1, 0), 
+                      Away_Simulated_Win = 1 - Home_Simulated_Win)
+                               ), simplify = FALSE)
+simulation_results
+```
+
+
+Simulation results are grouped into one single data frame.
+
+```{r}
+simulation_df = bind_rows(simulation_results, .id = "sim_id")
+```
+
+```{r}
+save(simulation_df, file = "simulation_df.Rda")
+```
+
+```{r}
+load("simulation_df.Rda")
+```
+
+```{r}
+simulation_df %>% 
+```
+
+
+
+various summary metrics are added, such as total wins/losses, as well as wins and losses while a given team is home or away. Teams are viewed as if they are the home team.
+
+```{r}
+hundred_season_summary = simulation_df %>% 
+  group_by(sim_id, Home_Tm) %>%
+  summarize(Home_Wins = sum(Home_Simulated_Win)) %>% left_join(simulation_df %>% group_by(sim_id, Away_Tm) %>% summarize (Away_Wins = sum(Away_Simulated_Win)), by = c("sim_id", "Home_Tm" = "Away_Tm")) %>% mutate(Total_Wins = Home_Wins + Away_Wins, Home_Losses = 82 - Home_Wins, Away_Losses = 82 - Away_Wins, Total_Losses = 162 - Total_Wins)
+hundred_season_summary
+```
+
+
+
+To answer the initial question of measuring how likely specific season level outcomes are to occur, we again create a variety of summary statistics.
+```{r}
+team_rankings = hundred_season_summary %>% group_by(sim_id) %>% mutate(League_Rank = rank(-Total_Wins, ties.method = "min")) %>% ungroup()
+
+team_summary = team_rankings %>% group_by(Home_Tm) %>% summarize(
+  Average_Rank = mean(League_Rank),
+  q25_rank = quantile(League_Rank, 0.25),
+  q75_rank = quantile(League_Rank, 0.75),
+  Times_1st = sum(League_Rank == 1),
+  Times_Top_5 = sum(League_Rank <= 5),
+  Times_Top_10 = sum(League_Rank <= 10),
+  Average_Wins = mean(Total_Wins),
+  q25_wins = quantile(Total_Wins, 0.25),
+  q75_wins = quantile(Total_Wins, 0.75),
+  Average_Losses = mean(Total_Losses),
+  Max_Wins = max(Total_Wins),
+  Min_Wins = min(Total_Wins),
+  Prob_1st = Times_1st/ n_sims,
+  Prob_Top_5 = Times_Top_5 / n_sims,
+  Prob_Top_10 = Times_Top_10 / n_sims
+)
+```
+
+
+Average season records for each team
+```{r}
+team_summary %>% select(Home_Tm, Average_Wins, Average_Losses)
+```
+
+
+
+#### Plots
+
+```{r}
+team_mapping_colors = c(
+  "CIN" = "reds",
+  "HOU" = "astros",
+  "SDP" = "padres",
+  "TBR" = "rays",
+  "OAK" = "athletics",
+  "WSN" = "nationals",
+  "BAL" = "orioles",
+  "MIN" = "twins",
+  "PHI" = "phillies",
+  "ARI" = "diamondbacks",
+  "CLE" = "indians",
+  "CHC" = "cubs",
+  "KCR" = "royals",
+  "NYM" = "mets",
+  "TEX" = "rangers",
+  "BOS" = "red_sox",
+  "CHW" = "white_sox",
+  "MIA" = "marlins",
+  "LAA" = "angels",
+  "STL" = "cardinals",
+  "MIL" = "brewers",
+  "LAD" = "dodgers",
+  "TOR" = "blue_jays",
+  "SFG" = "giants",
+  "SEA" = "mariners",
+  "PIT" = "pirates",
+  "COL" = "rockies",
+  "NYY" = "yankees",
+  "ATL" = "braves",
+  "DET" = "tigers"
+)
+```
+
+```{r}
+team_names <- (team_mapping_colors[team_summary$Home_Tm])
+
+team_names
+```
+
+
+
+```{r}
+top10 = ggplot(data = team_summary, aes(x = reorder(Home_Tm, Times_Top_10), y = Times_Top_10)) + geom_col()
+top10
+```
+
+```{r}
+top5 = ggplot(data = team_summary, aes(x = reorder(Home_Tm, Times_Top_5), y = Times_Top_5)) + geom_col()
+top5
+```
+
+
+```{r}
+top1 = ggplot(data = team_summary, aes(x = reorder(Home_Tm, Times_1st), y = Times_1st)) + geom_col() + labs(x = "Team", y = "Times First Place")
+top1
+```
+
+```{r}
+mlbb = mlb.colors(set = c("diamondbacks", "braves", "orioles", "red_sox", "cubs",
+  "white_sox", "reds", "indians", "rockies", "tigers", "astros", "royals",
+  "angels", "dodgers", "marlins", "brewers", "twins", "mets", "yankees",
+  "athletics", "phillies", "pirates", "padres", "giants", "mariners",
+  "cardinals", "rays", "rangers", "blue_jays", "nationals"))
+mlbb
+```
+
+
+```{r}
+records = ggplot(data = team_summary, aes(x = reorder(Home_Tm, Average_Wins), y = Average_Wins)) + geom_col()
+records
+```
+
+
+```{r}
+brier_score = mean((simulation_df$Home_Winner - simulation_df$Home_Win_Prob)^2)
+brier_score
+```
+
+```{r}
+brier <- function(y, phat){
+  return(mean( (y - phat)^2 ))
+}
+brier(simulation_df$Home_Winner, simulation_df$Home_Win_Prob)
+```
+
+```{r}
+logloss <- function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+logloss(simulation_df$Home_Winner, simulation_df$Home_Win_Prob
+        )
+```
+
+
+
+```{r}
+logloss <- function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+logloss(simulation_df$Home_Winner, simulation_df$Home_Simulated_Win)
+```
+
+
+
+
+
+```{r}
+simulation_df
+```
+
+
+### Model 2: Adjusting Based on the Starting Pitcher
+
+
+
+
+### Model 3: Adjusting Based on Recent Team Performance 
+
+### Limitations and Future Considerations
+
+One significant limitation of the model that must be considered is the variation among how long a starting pitcher plays for. However, there is potential that this implication is less important than it seems in the sense that "bad" starting pitchers tend to pitch for shorter times after allowing multiple runs, while "good" starting pitchers tend to play for longer, as they are less likely to allow runs.
+
+Rolling Average Failure
+
+
+Interactions between recent performance and batting. 
+
+No capturing of batting (how you actually score)
+
+A second limitation
+
+
+### Conclusions
+
+
