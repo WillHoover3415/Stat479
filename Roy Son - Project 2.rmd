@@ -1,0 +1,217 @@
+---
+title: "Roy Son - Project 2"
+author: "Roy Son"
+date: "2025-11-05"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+devtools::install_github("hturner/BradleyTerry2")
+library(BradleyTerry2)
+```
+
+```{r}
+games_with_pitchers <- read.csv("games_with_pitchers.csv")
+games_with_pitchers$Date = as.Date(games_with_pitchers$Date)
+```
+
+```{r}
+set.seed(50)
+
+n = nrow(games_with_pitchers)
+
+train_idx = sample(1:n, size = floor(0.25*n), replace = FALSE)
+
+train_df = games_with_pitchers[train_idx,]
+
+test_df = games_with_pitchers[-train_idx,]
+
+unik_teams = sort(unique(c(train_df$Home_Tm, train_df$Away_Tm)))
+```
+
+
+
+```{r}
+results <- games_with_pitchers %>% 
+  rename(home_team = Home_Tm, away_team = Away_Tm) %>% 
+  mutate(
+    home_team = factor(home_team, levels = unik_teams), 
+    away_team = factor(away_team,levels = unik_teams),
+    home_athome = 1,
+    away_athome = 0) %>% 
+  select(Date, game_id, home_team, away_team, Home_Winner, Away_Winner, home_athome, away_athome, Home_Pitcher_ERA, Away_Pitcher_ERA)
+
+results_train = results %>%
+  slice(train_idx)
+
+```
+
+
+```{r}
+##Temp Dataframe
+tmp_df <- data.frame(Home_Winner = results_train$Home_Winner, Away_Winner = results_train$Away_Winner)
+
+tmp_df$home_team <- data.frame(team = results_train$home_team, at_home = results_train$home_athome, pitcher_era = results_train$Home_Pitcher_ERA)
+
+tmp_df$away_team <- data.frame(team = results_train$away_team, at_home = results_train$away_athome, pitcher_era = results_train$Away_Pitcher_ERA)
+```
+
+```{r}
+summary(tmp_df$away_team["at_home"])
+
+
+summary(tmp_df$home_team["at_home"])
+```
+
+```{r}
+##Fitting Model to our Data
+fit <-
+  BTm(
+    outcome = cbind(Home_Winner, Away_Winner),  
+    player1 = home_team, player2 = away_team,
+    formula = ~ team + at_home + pitcher_era,
+    refcat = "BOS",
+    id = "team",
+    data = tmp_df) 
+
+summary(fit)
+```
+
+```{r}
+lambda_hat <- BTabilities(fit)
+lambda_home <- coef(fit)["at_home"]
+```
+
+```{r}
+##Home Win Prob
+Home_Win_Prob <- function(home_team, away_team, home_pitcher_era, 
+                          away_pitcher_era) {
+  diff_latent_strengths <- 
+    lambda_hat[home_team, "ability"] - lambda_hat[away_team, "ability"]
+  
+  diff_pitcher_eras <- (home_pitcher_era - away_pitcher_era)
+  
+  lambda_pitcher_era <- coef(fit)["pitcher_era"]
+  
+  return(1/(1 + exp(-1 * (diff_latent_strengths + lambda_home + (diff_pitcher_eras*lambda_pitcher_era)))))
+}
+```
+
+```{r}
+brier <- function(y, phat){
+  return(mean( (y - phat)^2 ))
+}
+
+logloss <- function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+
+probs_df <- results %>% 
+    mutate(home_win_prob = Home_Win_Prob(home_team, away_team, Home_Pitcher_ERA, Away_Pitcher_ERA))
+
+brier(probs_df$Home_Winner, probs_df$home_win_prob)
+logloss(probs_df$Home_Winner, probs_df$home_win_prob)
+```
+
+
+```{r}
+set.seed(100)
+
+Simulated_Seasons = 1000
+
+sim_df = probs_df %>%
+  select(home_team, away_team, home_win_prob)
+
+prob_home_win = sim_df$home_win_prob
+n_games = length(prob_home_win)
+
+outcomes = matrix(
+  rbinom(n_games * Simulated_Seasons, size = 1, prob = rep(prob_home_win, Simulated_Seasons)),
+  nrow = n_games, ncol = Simulated_Seasons
+)
+
+H = model.matrix(~home_team -1, sim_df)
+A = model.matrix(~away_team -1, sim_df)
+team_names = colnames(H)
+
+Wins = t(H) %*% outcomes + t(A) %*% (1-outcomes)
+
+actual_wins = games_with_pitchers %>%
+  mutate(Winner = as.character(Winner)) %>%
+  count(Winner, name = "Actual_Wins") %>%
+  rename(Team = Winner)
+
+monte_carlo_expected_wins = tibble(
+  Team = team_names,
+  Expected_wins = round(rowMeans(Wins),0),
+  q_2.5 = apply(Wins, 1, quantile, probs = 0.025),
+  q_50 = apply(Wins, 1, quantile, probs = 0.50),
+  q_97.5 = apply(Wins, 1, quantile, probs = 0.975)
+) %>%
+  arrange(desc(Expected_wins))
+
+monte_carlo_expected_wins = monte_carlo_expected_wins %>%
+  mutate(Team = recode(Team,
+                       "home_teamARI" = "ARI",
+                       "home_teamATL" = "ATL",
+                       "home_teamBAL" = "BAL",
+                       "home_teamBOS" = "BOS",
+                       "home_teamCHC" = "CHC",
+                       "home_teamCHW" = "CHW",
+                       "home_teamCIN" = "CIN",
+                       "home_teamCLE" = "CLE",
+                       "home_teamCOL" = "COL",
+                       "home_teamDET" = "DET",
+                       "home_teamHOU" = "HOU",
+                       "home_teamKCR" = "KCR",
+                       "home_teamLAA" = "LAA",
+                       "home_teamLAD" = "LAD",
+                       "home_teamMIA" = "MIA",
+                       "home_teamMIL" = "MIL",
+                       "home_teamMIN" = "MIN",
+                       "home_teamNYM" = "NYM",
+                       "home_teamNYY" = "NYY",
+                       "home_teamOAK" = "OAK",
+                       "home_teamPHI" = "PHI",
+                       "home_teamPIT" = "PIT",
+                       "home_teamSDP" = "SDP",
+                       "home_teamSFG" = "SFG",
+                       "home_teamSEA" = "SEA",
+                       "home_teamSTL" = "STL",
+                       "home_teamTBR" = "TBR",
+                       "home_teamTEX" = "TEX",
+                       "home_teamTOR" = "TOR",
+                       "home_teamWSN" = "WSN"
+                       ))
+
+monte_carlo_expected_wins = monte_carlo_expected_wins %>%
+  left_join(actual_wins, by = "Team")
+
+monte_carlo_expected_wins %>% 
+  print(n=30)
+```
+
+
+
+```{r}
+mlb_colors_custom = c( "ARI" = "#A71930", "ATL" = "#CE1141", "BAL" = "#DF4601", "BOS" = "#BD3039", "CHC" = "#0E3386", "CHW" = "#27251F", "CIN" = "#C6011F", "CLE" = "#E31937", "COL" = "#552583", "DET" = "#0C2C56", "HOU" = "#EB6E1F", "KCR" = "#004687", "LAA" = "#BA0021", "LAD" = "#005A9C", "MIA" = "#00A3E0", "MIL" = "#12284B", "MIN" = "#002B5C", "NYM " = "#002D72", "NYY" = "#0C2340", "OAK" = "#006341", "PHI" = "#E81828", "PIT" = "#FDB827", "SDP" = "#2F241D", "SFG" = "#FD5A1E", "SEA " = "#0C2C56", "STL" = "#C41E3A", "TBR" = "#092C5C", "TEX" = "#003278", "TOR" = "#134A8E", "WSN" = "#AB0003", "DET" = "#0C2C56" )
+
+ggplot(monte_carlo_expected_wins, 
+       aes(x = reorder(Team, Expected_wins),
+           y = Expected_wins,
+           color = Team))+
+  geom_point(size = 4)+
+  geom_errorbar(aes(ymin = q_2.5, ymax = q_97.5), width = 0.25)+
+  coord_flip()+
+  scale_color_manual(values = mlb_colors_custom)+
+  labs(
+    title = "Expected Wins using Monte Carlo",
+    x = "Team",
+    y = "Expected Wins"
+  )+theme_minimal()
+```
+
