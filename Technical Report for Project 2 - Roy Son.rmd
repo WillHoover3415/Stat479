@@ -1,0 +1,125 @@
+---
+title: "Technical Report for Project 2 - Roy Son"
+author: "Roy Son"
+date: "2025-11-08"
+output: html_document
+---
+
+### Loading Packages 
+#First, to implement the second model:captures the effects of the starting pitcher and home field advantage, we load tidyverse because we need a lot of data manipulation to clean and reshape the dataset that contains MLB games. Then install and load BradleyTerry2 because this package also us to use Bradley-Terry model. Bradley-Terry is important for this model because it allows pairwise comparisons between two teams. Also it allows adding covariates like home field and pitceher ERA to adjust the log-odds. 
+```{r}
+library(tidyverse)
+devtools::install_github("hturner/BradleyTerry2")
+library(BradleyTerry2)
+```
+
+
+###Getting MLB Data that contains 2024 MLB Season 
+#Then we read in the dataset that contains all 2024 regular season MLB games with information about the starting pitchers for every individual game. Then I converted Date to proper date calss to align games chronologically. This dataset has both the home pitcher ERA and away pitcher ERA, which is what we are going to measure starting pitcher's strength. 
+```{r}
+games_with_pitchers <- read.csv("games_with_pitchers.csv")
+games_with_pitchers$Date = as.Date(games_with_pitchers$Date)
+```
+
+
+### Metrics for Model Evaluation 
+#Next, we define two standard predictive accuracy model: brier Score and log-loss like we did for the preveious model. Both measures how close my probability predicitons are to actual game outcomes. For both metrics, lower the score more accuracy it has with actual game. Like previeous model, we will use these two metrics to compare how well model performed. We got the formula for brier Score and log-loss at professor Sameer's note. 
+```{r}
+brier <- function(y, phat){
+  return(mean( (y - phat)^2 ))
+}
+
+logloss <- function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+```
+
+
+```{r}
+### Fitting and evaluating Model 
+#Before we fit and evaluate the model, first we set the seed so the random result we get is the same every time when we run the script. Then we store the total number of games in n and create an empty data frame where we will store 100 repeated train-test performance pairs. 
+set.seed(50)
+
+n = nrow(games_with_pitchers)
+
+cv_log = data.frame()
+
+# Then we made the loop and inside the loop, we repeated the following 100 times: randomly choose 75% of the games from 2024 season as training data to train the model. Then for the remaining 25% of the game, we use it as test data to test its power. Doing this gives us 100 independent evaluations of the model, so summary statistics would show stable evidence of performance. We also made the unqiue set of teams in train data because factor levels in Bradley-Terry must be consisten when fitting parameters. 
+for(r in 1:100){
+  train_idx = sample(1:n, size = floor(0.75*n), replace = FALSE)
+  train_df = games_with_pitchers[train_idx,]
+  test_df = games_with_pitchers[-train_idx,]
+  unik_teams = sort(unique(c(train_df$Home_Tm, train_df$Away_Tm)))
+  
+  # We rename the columns so they match model semantics(home_team and away_team). Then we convert them into factors with the identical set of levels so BTm() would align team abilities on the same reference scale. We defined 1 for home field and 0 for away field because the model needs a numeric indicator to estimate how much being home adds to win probability. Same formatting is done for the test data so that predictions have consistent feature values.  
+  results_train = train_df %>%
+    rename(home_team = Home_Tm, away_team = Away_Tm) %>% 
+  mutate(
+    home_team = factor(home_team, levels = unik_teams), 
+    away_team = factor(away_team,levels = unik_teams),
+    home_athome = 1,
+    away_athome = 0)
+  
+  results_test = test_df %>%
+    rename(home_team = Home_Tm, away_team = Away_Tm)%>%
+    mutate(
+      home_team = factor(home_team, levels = unik_teams),
+      away_team = factor(away_team, levels = unik_teams),
+      home_athome =1,
+      away_athome = 0
+    )
+  
+  #Then, we bundle the home team ability, home indicator, and home starting pitcher ERA as variables that belong to player1, and bundle the away team ability, away indicator, and away staring pitcher ERA as variables that belong to player2. This is what allows the BTm() to interpret ERA differences as a strucuted covariate that belongs to each competitor in a pairwise comparison. 
+  tmp_df <- data.frame(Home_Winner = results_train$Home_Winner, Away_Winner = results_train$Away_Winner)
+  
+  tmp_df$home_team <- data.frame(team = results_train$home_team, at_home = results_train$home_athome, pitcher_era = results_train$Home_Pitcher_ERA)
+  
+  tmp_df$away_team <- data.frame(team = results_train$away_team, at_home = results_train$away_athome, pitcher_era = results_train$Away_Pitcher_ERA)
+  
+  #Now this is the core part of the model. Bradley-Terry creates a  logistic regression that estimates a baseline ability for every team, plus home field effect, and the effect of how much better the home pitcher's ERA is than the away pitcher's ERA using Arizona Diamondbacks as a reference team. 
+  fit <-
+  BTm(
+    outcome = cbind(Home_Winner, Away_Winner),  
+    player1 = home_team, player2 = away_team,
+    formula = ~ team + at_home + pitcher_era,
+    refcat = "ARI",
+    id = "team",
+    data = tmp_df) 
+  
+  # After making a fit, we extract the estimated parameters so we can compute the predicted probability for each Test game, not training games. The predicted log-odds is home team ability - away team ability + home advantage + the ERA difference. Then we convert log-odds to probability using plogis(). This gives us predicted win chances for every game in the 25% test data that the training model never saw. 
+  abil_mat = BTabilities(fit)
+  abil = abil_mat[,"ability"]
+  beta_home = coef(fit)["at_home"]
+  beta_era = coef(fit)["pitcher_era"]
+  
+  home = as.character(results_test$home_team)
+  away = as.character(results_test$away_team)
+  difference_in_abil = abil[home] - abil[away]
+  difference_era = results_test$Home_Pitcher_ERA - results_test$Away_Pitcher_ERA
+  
+  phat = plogis(difference_in_abil + beta_home + difference_era * beta_era) 
+  
+  #After computing model coefficients into probabilities for Test games, we compute brier Score and log loss for this test fold and append them to results log. After looping it 100 times, we have 100 independent performances estimate, which we average them to summarize how accurate the model is overall at predicting results of MLB games. 
+  cv_log = rbind(cv_log,
+                 data.frame(iter = r,
+                            brier=brier(results_test$Home_Winner, phat),
+                            logloss=logloss(results_test$Home_Winner, phat)))
+}
+
+```
+
+###Finally after fitting the Bradley-Terry model with team ability, hom field advantage, and effect of the staring pitcher, we examined the estimated coefficients. Each team has an estimated coefficent relative to Arizona Dimaondbacks. Most team coefficients not being statistically significant by themselves shows this model tries to estimate relative strength conditional on who they actually played and also controlling for pitcher effects. In this summary, there are two important results that we can interpret. The home field effect(at_home) is estimated at 0.076 which means being home slightly increases the log-odds of winning, but p-value of 0.17 indicates that it is not strong enough to be statistically significant on its own. On the other hand, the pitcher ERA effects is estimated at -0.235 with an extremely small p-value of < 2e-16. This shows that coefficent is highly statistically significant, meaning when the home team's starting pitcher has a better ERA than the away pitcher, this strongly increase the probability that the home team winning the game.Lastly, we aggregate the cross validation perofmrance results across the 100 randomized 75/25 splits. The average brier score was about about 0.161 and the average log loss was about 0.521. These scores are both lower than the previeous simpler model we tested which had a brier and log loss of 0.245 and 0.684. Since lower scores are better for both brier and log-loss, this demonstrates that adding starting pitcher and home field advantage clearly improves predictive performance. It is statistically confirmed that including pitcher ERA made the model more accurate at predicitng game outcomes. This means Model 2 does a better job of capturing outcome variation than just using teams alone. 
+
+```{r}
+summary(fit)
+
+
+cv_log %>%
+  summarize(mean_brier = mean(brier),
+            mean_logloss = mean(logloss))
+```
+
+
