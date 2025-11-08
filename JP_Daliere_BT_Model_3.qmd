@@ -1,0 +1,391 @@
+---
+title: "BT Model 3 (Accounting for Team Form)"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+devtools::install_github("hturner/BradleyTerry2")
+library(BradleyTerry2)
+```
+
+First, we load in the dataframe.
+
+```{r}
+##Load in the games_with_pitchers df
+games_with_pitchers <- read.csv("games_with_pitchers.csv")
+```
+
+Next, we prepare the data for analysis.
+
+We derive new columns for at_home (indicator variable which signals whether team was playing at home) and pitcher_ERA (starting pitcher ERA).
+
+```{r}
+unik_teams <- sort(unique(c(games_with_pitchers$Home_Tm, games_with_pitchers$Away_Tm)))
+
+results <- games_with_pitchers %>% 
+  rename(home_team = Home_Tm, away_team = Away_Tm) %>% 
+  mutate(
+    home_team = factor(home_team, levels = unik_teams), 
+    away_team = factor(away_team,levels = unik_teams),
+    home_athome = 1,
+    away_athome = 0) %>% 
+  select(Date, game_id, home_team, away_team, Home_Winner, Away_Winner, home_athome, away_athome, Home_Pitcher_ERA, Away_Pitcher_ERA)
+  
+
+##Temp Dataframe
+tmp_df <- data.frame(Home_Winner = results$Home_Winner, Away_Winner = results$Away_Winner)
+
+##Home Dataframe appended to temp Dataframe
+tmp_df$home_team <- data.frame(team = results$home_team, at_home = results$home_athome, pitcher_era = results$Home_Pitcher_ERA)
+
+##Away Dataframe appended to temp Dataframe
+tmp_df$away_team <- data.frame(team = results$away_team, at_home = results$away_athome, pitcher_era = results$Away_Pitcher_ERA)
+```
+
+**Create Home Win Probability Function**
+
+```{r}
+##Home Win Prob
+Home_Win_Prob <- function(home_team, away_team, home_pitcher_era, 
+                          away_pitcher_era, home_team_form, away_team_form) {
+  diff_latent_strengths <- 
+    lambda_hat[home_team, "ability"] - lambda_hat[away_team, "ability"]
+  
+  diff_pitcher_eras <- (home_pitcher_era - away_pitcher_era)
+  
+  diff_team_forms <- (home_team_form - away_team_form)
+  
+  return(1/(1 + exp(-1 * (diff_latent_strengths + lambda_home + (diff_pitcher_eras*lambda_pitcher_era) + (diff_team_forms * lambda_form)))))
+}
+```
+
+**Create Functions for Computing Log-Loss and Brier Score**
+
+```{r}
+brier <- function(y, phat){
+  return(mean( (y - phat)^2 ))
+}
+
+logloss <- function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+```
+
+**BT Model with Team Form:**
+
+Our BT Model accounting for team form adds an additional covariate for team form. Team Form is a team's win rate over their last 15 games.
+
+**Creating Team Form Variable**:
+
+To build our BT model which accounts for team form, we first create a variable for Team Form.
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+# Ensure Date is a proper Date type and games are in order
+results <- results %>%
+  mutate(Date = as.Date(Date)) %>%
+  arrange(Date)
+
+# Long format: one row per team per game
+results_long <- results %>%
+  mutate(Game_ID = row_number()) %>%
+  pivot_longer(
+    cols = c(home_team, away_team),
+    names_to = "Side",
+    values_to = "Team"
+  ) %>%
+  mutate(
+    Win = ifelse(Side == "home_team", Home_Winner, Away_Winner)
+  ) %>%
+  select(Game_ID, Date, Team, Win)
+
+# Compute each team's rolling win rate (last 15 games)
+results_form <- results_long %>%
+  group_by(Team) %>%
+  arrange(Date) %>%
+  mutate(
+    team_form = map_dbl(seq_along(Win), function(i) {
+      past_games <- Win[max(1, i - 15):(i - 1)]
+      if (length(past_games) == 0) return(NA_real_)
+      mean(past_games)
+    })
+  ) %>%
+  ungroup()
+
+# Join both home and away team form values back to main dataset
+results_form <- results_form %>%
+  group_by(Game_ID, Date) %>%
+  arrange(Game_ID, Date, row_number()) %>%  # ensure order within game
+  mutate(team_order = row_number()) %>%
+  summarise(
+    home_team = Team[team_order == 1],
+    away_team = Team[team_order == 2],
+    home_winner = Win[team_order == 1],
+    away_winner = Win[team_order == 2],
+    home_team_form = team_form[team_order == 1],
+    away_team_form = team_form[team_order == 2],
+    .groups = "drop"
+  ) %>% 
+  rename(game_id = "Game_ID", Home_Winner = "home_winner", Away_Winner = "away_winner")
+
+results <- inner_join(results, results_form)
+```
+
+**Create Temporary Dataframe to Fit our Model**
+
+```{r}
+##Temp Dataframe
+tmp_df <- data.frame(game_id = results$game_id, Home_Winner = results$Home_Winner, Away_Winner = results$Away_Winner)
+
+##Home Dataframe appended to temp Dataframe
+tmp_df$home_team <- data.frame(team = results$home_team, at_home = results$home_athome, pitcher_era = results$Home_Pitcher_ERA, form = results$home_team_form)
+
+##Away Dataframe appended to temp Dataframe
+tmp_df$away_team <- data.frame(team = results$away_team, at_home = results$away_athome, pitcher_era = results$Away_Pitcher_ERA, form = results$away_team_form)
+```
+
+**Assessing Model Accuracy:**
+
+```{r}
+n_sims <- 100
+n_row = nrow(tmp_df)
+n_train <- floor(0.75*n_row)
+
+##Initialize testing log loss vector
+test_logloss <- rep(NA, times = n_sims)
+test_brier <- rep(NA, times = n_sims)
+
+for(r in 1:n_sims){
+  set.seed(479+r)
+  train_data <-
+    tmp_df |>
+    dplyr::slice_sample(n = n_train)
+  test_data <-
+    results |>
+    dplyr::anti_join(y = train_data, by = "game_id") 
+
+  ##Fit model using training data
+  fit_form <-
+    BTm(
+      outcome = cbind(Home_Winner, Away_Winner),  
+      player1 = home_team, player2 = away_team,
+      formula = ~ team + at_home + pitcher_era + form,
+      refcat = "ARI",
+      id = "team",
+      data = train_data) 
+  
+  ##Extract Lambdas
+  lambda_hat <- BTabilities(fit_form)
+  lambda_home <- coef(fit_form)["at_home"]
+  lambda_form <- coef(fit_form)["form"]
+  lambda_pitcher_era <- coef(fit_form)["pitcher_era"]
+  
+  
+  ##Make predictions on testing data
+  test_preds_df <- test_data %>% 
+    mutate(home_win_prob = Home_Win_Prob(home_team, away_team, Home_Pitcher_ERA, Away_Pitcher_ERA, home_team_form, away_team_form))
+  
+  ##Compute log-loss and Brier score and store them in the log-loss and brier score vectors
+  test_logloss[r] <-
+    logloss(test_preds_df$Home_Winner, test_preds_df$home_win_prob)
+  test_brier[r] <-
+    brier(test_preds_df$Home_Winner, test_preds_df$home_win_prob)
+}
+
+cat("Dist testing logloss:", round(mean(test_logloss), digits = 3), "\n")
+cat("Dist testing brier:", round(mean(test_brier), digits = 3), "\n")
+
+mean(test_logloss)
+mean(test_brier)
+```
+
+```{r}
+lambda_hat <- BTabilities(fit_form)
+lambda_home <- coef(fit_form)["at_home"]
+lambda_form <- coef(fit_form)["form"]
+lambda_pitcher_era <- coef(fit_form)["pitcher_era"]
+```
+
+```{r}
+mean(test_logloss)
+mean(test_brier)
+```
+
+**Fitting BT Model with Team Form:**
+
+```{r}
+fit_form <-
+    BTm(
+      outcome = cbind(Home_Winner, Away_Winner),  
+      player1 = home_team, player2 = away_team,
+      formula = ~ team + at_home + pitcher_era + form,
+      refcat = "ARI",
+      id = "team",
+      data = tmp_df)
+
+summary(fit_form)
+```
+
+**Extract Lambda Values:**
+
+```{r}
+lambda_hat <- BTabilities(fit_form)
+lambda_home <- coef(fit_form)["at_home"]
+lambda_form <- coef(fit_form)["form"]
+lambda_pitcher_era <- coef(fit_form)["pitcher_era"]
+```
+
+**Create Dataframe with Theoretical Win Probabilities**
+
+```{r}
+preds_df <- results %>% 
+    mutate(home_win_prob = Home_Win_Prob(home_team, away_team, Home_Pitcher_ERA, Away_Pitcher_ERA, home_team_form, away_team_form))
+```
+
+**Distribution of Wins**
+
+```{r}
+set.seed(380)
+n_sims <- 100
+
+simulations_results <- 
+  replicate(n_sims, (preds_df %>% 
+                         mutate(
+                         random_number = runif(n()),
+                         Home_Simulated_Win = ifelse(home_win_prob > random_number, 1, 0),
+                         Away_Simulated_Win = 1 - Home_Simulated_Win)
+  ), simplify = FALSE)
+```
+
+**Simulation Results Grouped into a Single Dataframe**
+
+```{r}
+simulation_df = bind_rows(simulations_results, .id = "sim_id")
+simulation_df
+```
+
+**Simulation Results from all 100 Seasons Grouped into a Single Dataframe**
+
+```{r}
+hundred_season_summary_tmp_1 <- simulation_df %>% 
+  group_by(sim_id, home_team) %>% 
+  summarize(Home_Wins = sum(Home_Simulated_Win)) %>% 
+  rename(team = home_team)
+
+hundred_season_summary_tmp_2 <- simulation_df %>% 
+  group_by(sim_id, away_team) %>% 
+  summarize(Away_Wins = sum(Away_Simulated_Win)) %>% 
+  rename(team = away_team)
+
+hundred_season_summary <- hundred_season_summary_tmp_1 %>% 
+  left_join(hundred_season_summary_tmp_2, by = c("team", "sim_id")) %>% 
+  mutate(Total_Wins = Home_Wins + Away_Wins, Home_Losses = 81 - Home_Wins, Away_Losses = 81 - Away_Wins, Total_Losses = 162 - Total_Wins)
+```
+
+**Summary Statistics for Distribution of Wins**
+
+```{r}
+##Team Rankings
+team_rankings = hundred_season_summary %>%
+  group_by(sim_id) %>% 
+  mutate(League_Rank = rank(-Total_Wins, ties.method = "min")) %>%
+  ungroup()
+
+##Table with Summary Statistics
+team_summary = team_rankings %>% 
+  group_by(team) %>% 
+  summarize(Average_Rank = mean(League_Rank),
+            q25_rank = quantile(League_Rank, 0.25),
+            q75_rank = quantile(League_Rank, 0.75),
+            Times_1st = sum(League_Rank == 1),
+            Times_Top_5 = sum(League_Rank <= 5),
+            Times_Top_10 = sum(League_Rank <= 10),
+            Average_Wins = mean(Total_Wins),
+            q25_wins = quantile(Total_Wins, 0.25),
+            q75_wins = quantile(Total_Wins, 0.75),
+            Average_Losses = mean(Total_Losses),
+            Max_Wins = max(Total_Wins),
+            Min_Wins = min(Total_Wins),
+            Prob_1st = Times_1st/ n_sims,
+            Prob_Top_5 = Times_Top_5 / n_sims,
+            Prob_Top_10 = Times_Top_10 / n_sims
+)
+```
+
+**Set Color Palette**
+
+```{r}
+mlb_colors_custom = c(
+  "ARI" = "#A71930",
+  "ATL" = "#CE1141",
+  "BAL" = "#DF4601",
+  "BOS" = "#BD3039",
+  "CHC" = "#0E3386",
+  "CHW" = "#27251F",
+  "CIN" = "#C6011F",
+  "CLE" = "#E31937",
+  "COL" = "#552583",
+  "DET" = "#0C2C56",
+  "HOU" = "#EB6E1F",
+  "KCR" = "#004687",
+  "LAA" = "#BA0021",
+  "LAD" = "#005A9C",
+  "MIA" = "#00A3E0",
+  "MIL" = "#12284B",
+  "MIN" = "#002B5C",
+  "NYM" = "#002D72",
+  "NYY" = "#0C2340",
+  "OAK" = "#006341",
+  "PHI" = "#E81828",
+  "PIT" = "#FDB827",
+  "SDP" = "#2F241D",
+  "SFG" = "#FD5A1E",
+  "SEA" = "#0C2C56",
+  "STL" = "#C41E3A",
+  "TBR" = "#092C5C",
+  "TEX" = "#003278",
+  "TOR" = "#134A8E",
+  "WSN" = "#AB0003",
+  "DET" = "#0C2C56"
+)
+```
+
+```{r}
+home_winners = games_with_pitchers %>% group_by(Home_Tm) %>% summarise(Home_Wins = sum(Home_Winner))  %>% ungroup() %>% 
+  rename(team = Home_Tm)
+away_winners = games_with_pitchers %>% group_by(Away_Tm) %>% summarise(Away_Wins = sum(Away_Winner))  %>% ungroup() %>% 
+  rename(team = Away_Tm)
+total_winners <- home_winners %>% 
+  left_join(away_winners, by = "team") %>% 
+  mutate(total_wins = Home_Wins + Away_Wins) %>% 
+  select(team, total_wins)
+team_summary <- team_summary %>%
+  left_join(total_winners, by = "team")
+```
+
+**Win Distribution Graph**
+
+```{r}
+ggplot(team_summary, aes(x = reorder(team, Average_Wins))) +
+  geom_col(aes(y = Average_Wins), fill = "gray7", alpha = 0.6) +
+  geom_col(aes(y = total_wins, fill = team), width = 0.5) +
+  scale_fill_manual(values = mlb_colors_custom) +
+  labs(x = "Team", y = "Wins") +
+  ggtitle("Team Win Distribution") +
+  theme_minimal() +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+top1 = ggplot(data = team_summary, aes(x = reorder(team, Times_1st), y = Times_1st, fill = team)) + geom_col() + scale_fill_manual(values = mlb_colors_custom) + theme(legend.position = "none") + labs(x = "Team", y = "Times First Place") + labs(x = "Team", y = "First Place Finishes Through 100 Simulations" ) + ggtitle("Number of First Place Finishes through 100 Simulations") + theme_minimal() +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5))
+top1
+```
