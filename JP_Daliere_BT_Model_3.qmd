@@ -1,5 +1,5 @@
 ---
-title: "BT Model (Accounting for Team Form)"
+title: "BT Model 3 (Accounting for Team Form)"
 format: html
 editor: visual
 ---
@@ -10,6 +10,22 @@ devtools::install_github("hturner/BradleyTerry2")
 library(BradleyTerry2)
 ```
 
+**BT Model #3: Accounting for Team Form:**
+
+The third and final Bradley-Terry Model we built accounts for one additional variable: team form.
+
+**Motivation:**
+
+Over the course of a 162 game season, it is common for players and teams to get hot and cold. Because of this, we wonder if accounting for recent team performance will make our model more accurate.
+
+**Team Form:**
+
+We define team form as a team's win rate over their last 15 games.
+
+Team Form = \# of Wins over last 15 games / 15
+
+**1. Building our BT Model #3:**
+
 First, we load in the dataframe.
 
 ```{r}
@@ -17,9 +33,7 @@ First, we load in the dataframe.
 games_with_pitchers <- read.csv("games_with_pitchers.csv")
 ```
 
-Next, we prepare the data for analysis.
-
-We derive new columns for at_home (indicator variable which signals whether team was playing at home) and pitcher_ERA (starting pitcher ERA).
+Next, we perform data manipulation. We derive new columns for at_home (indicator variable which signals whether team was playing at home) and pitcher_ERA (starting pitcher ERA).
 
 ```{r}
 unik_teams <- sort(unique(c(games_with_pitchers$Home_Tm, games_with_pitchers$Away_Tm)))
@@ -32,55 +46,45 @@ results <- games_with_pitchers %>%
     home_athome = 1,
     away_athome = 0) %>% 
   select(Date, game_id, home_team, away_team, Home_Winner, Away_Winner, home_athome, away_athome, Home_Pitcher_ERA, Away_Pitcher_ERA)
-  
-
-##Temp Dataframe
-tmp_df <- data.frame(Home_Winner = results$Home_Winner, Away_Winner = results$Away_Winner)
-
-##Home Dataframe appended to temp Dataframe
-tmp_df$home_team <- data.frame(team = results$home_team, at_home = results$home_athome, pitcher_era = results$Home_Pitcher_ERA)
-
-##Away Dataframe appended to temp Dataframe
-tmp_df$away_team <- data.frame(team = results$away_team, at_home = results$away_athome, pitcher_era = results$Away_Pitcher_ERA)
 ```
 
-**Create Home Win Probability Function**
+**Create Home Win Probability Function:**
+
+We then define our home win probability function. This will be used to compute theoretical win probabilities for the home team in every regular season game.
+
+It takes six arguments:
+
+1.  home_team
+2.  away_team
+3.  home_pitcher_ERA
+4.  away_pitcher_ERA
+5.  home_team_form
+6.  away_team_form
+
+It then uses these variables to compute the difference in latent strengths, difference in pitcher ERAs, and difference in team forms, which are plugged into the formula for the probability that team H (the home team) beats team A (the away team) at H's home.
 
 ```{r}
 ##Home Win Prob
 Home_Win_Prob <- function(home_team, away_team, home_pitcher_era, 
-                          away_pitcher_era) {
+                          away_pitcher_era, home_team_form, away_team_form) {
   diff_latent_strengths <- 
     lambda_hat[home_team, "ability"] - lambda_hat[away_team, "ability"]
   
   diff_pitcher_eras <- (home_pitcher_era - away_pitcher_era)
   
-  return(1/(1 + exp(-1 * (diff_latent_strengths + lambda_home + (diff_pitcher_eras*lambda_pitcher_era)))))
-}
-```
-
-**Create Functions for Computing Log-Loss and Brier Score**
-
-```{r}
-brier <- function(y, phat){
-  return(mean( (y - phat)^2 ))
-}
-
-logloss <- function(y, phat){
+  diff_team_forms <- (home_team_form - away_team_form)
   
-  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
-  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
-  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+  return(1/(1 + exp(-1 * (diff_latent_strengths + lambda_home + (diff_pitcher_eras*lambda_pitcher_era) + (diff_team_forms * lambda_form)))))
 }
 ```
-
-**BT Model with Team Form:**
-
-Our BT Model accounting for team form adds an additional covariate for team form. Team Form is a team's win rate over their last 15 games.
 
 **Creating Team Form Variable**:
 
-To build our BT model which accounts for team form, we first create a variable for Team Form.
+To build our BT model which accounts for team form, we first must derive two new variables: home_team_form and away_team_form.
+
+We derive these team form variables by pivoting our dataframe into a longer format where each row corresponds to a unique team and game. And each row contains information as to whether each team won or lost the game.
+
+We then use this longer dataframe to compute each team's win rate (over their last 15 games). And combine this dataframe (containing team form) with our original dataframe.
 
 ```{r}
 library(dplyr)
@@ -92,7 +96,7 @@ results <- results %>%
   mutate(Date = as.Date(Date)) %>%
   arrange(Date)
 
-# Long format: one row per team per game
+# Longer format: each row corresponds to a unique game and team combination
 results_long <- results %>%
   mutate(Game_ID = row_number()) %>%
   pivot_longer(
@@ -105,7 +109,7 @@ results_long <- results %>%
   ) %>%
   select(Game_ID, Date, Team, Win)
 
-# Compute each team's rolling win rate (last 15 games)
+# Compute each team's rolling win rate (over last 15 games)
 results_form <- results_long %>%
   group_by(Team) %>%
   arrange(Date) %>%
@@ -118,10 +122,10 @@ results_form <- results_long %>%
   ) %>%
   ungroup()
 
-# Join both home and away team form values back to main dataset
+# Join both home and away team form back into main dataframe
 results_form <- results_form %>%
   group_by(Game_ID, Date) %>%
-  arrange(Game_ID, Date, row_number()) %>%  # ensure order within game
+  arrange(Game_ID, Date, row_number()) %>%
   mutate(team_order = row_number()) %>%
   summarise(
     home_team = Team[team_order == 1],
@@ -134,10 +138,15 @@ results_form <- results_form %>%
   ) %>% 
   rename(game_id = "Game_ID", Home_Winner = "home_winner", Away_Winner = "away_winner")
 
+##Combine with original dataframe
 results <- inner_join(results, results_form)
 ```
 
-**Create Temporary Dataframe to Fit our Model**
+**Create Temporary Dataframe to Fit our Model:**
+
+To fit the Bradley-Terry Model, our data needs to be in a particular format. The response variables Home_Winner and Away_Winner (indicator variables which indicate whether the home and away teams won or lost) must be stored in a temporary dataframe first.
+
+Then dataframes for the home and away teams (containing all of the relevant variables) are appended to the original temporary dataframe.
 
 ```{r}
 ##Temp Dataframe
@@ -150,7 +159,48 @@ tmp_df$home_team <- data.frame(team = results$home_team, at_home = results$home_
 tmp_df$away_team <- data.frame(team = results$away_team, at_home = results$away_athome, pitcher_era = results$Away_Pitcher_ERA, form = results$away_team_form)
 ```
 
-**Assessing Model Accuracy:**
+**Fitting BT Model with Team Form:**
+
+Once the temporary dataframe is created, we can now fit a Bradley-Terry model to the data. To fit the Bradley_Terry model, we use the BTm function from the BradleyTerry2 package in R.
+
+```{r}
+{r}
+fit_form <-
+    BTm(
+      outcome = cbind(Home_Winner, Away_Winner),  
+      player1 = home_team, player2 = away_team,
+      formula = ~ team + at_home + pitcher_era + form,
+      refcat = "ARI",
+      id = "team",
+      data = tmp_df)
+
+summary(fit_form)
+```
+
+Above, you can see a summary output for our model. Surprisingly, the effect of team form was not statistically significant. We obtained an estimate of approximately 0.077.
+
+**2. Assessing Model Accuracy:**
+
+Before using our model to do downstream analysis, we want to assess how good it is at predicting new data. And we want to compare it to our second Bradley-Terry Model which outperformed the first.
+
+We first defined two intermediate functions for Log-Loss and Brier Score which will be used to assess our model's accuracy.
+
+```{r}
+##Brier Score Function
+brier <- function(y, phat){
+  return(mean( (y - phat)^2 ))
+}
+
+##Log-Loss Function
+logloss <- function(y, phat){
+  
+  if(any(phat < 1e-12)) phat[phat < 1e-12] <- 1e-12
+  if(any(phat > 1-1e-12)) phat[phat > 1-1e-12] <- 1-1e-12
+  return(-1 * mean( y * log(phat) + (1-y) * log(1-phat)))
+}
+```
+
+We then created 100 random training-test splits (75% training/25% testing) and assessed our model’s accuracy using brier score and log-loss. As can be seen, the BT Model 3 outperformed the second.
 
 ```{r}
 n_sims <- 100
@@ -200,40 +250,16 @@ for(r in 1:n_sims){
 
 cat("Dist testing logloss:", round(mean(test_logloss), digits = 3), "\n")
 cat("Dist testing brier:", round(mean(test_brier), digits = 3), "\n")
-
-mean(test_logloss)
-mean(test_brier)
 ```
 
-```{r}
-lambda_hat <- BTabilities(fit_form)
-lambda_home <- coef(fit_form)["at_home"]
-lambda_form <- coef(fit_form)["form"]
-lambda_pitcher_era <- coef(fit_form)["pitcher_era"]
-```
+Our BT Model 3 had a log-loss of approximately 0.517 and a brier score of approximately 0.16. Therefore, we proceed with it to do downstream analysis as it is our most accurate model.
 
-```{r}
-mean(test_logloss)
-mean(test_brier)
-```
-
-**Fitting BT Model with Team Form:**
-
-```{r}
-fit_form <-
-    BTm(
-      outcome = cbind(Home_Winner, Away_Winner),  
-      player1 = home_team, player2 = away_team,
-      formula = ~ team + at_home + pitcher_era + form,
-      refcat = "ARI",
-      id = "team",
-      data = tmp_df)
-
-summary(fit_form)
-```
+**3. Analysis with BT Model 3**
 
 **Extract Lambda Values:**
 
+We extract the lambdas for the latent team strengths, for home advantage, for team form, and for pitcher ERAs. These lambdas will be plugged into our home_win_prob function to obtain theoretical home win probabilities.
+
 ```{r}
 lambda_hat <- BTabilities(fit_form)
 lambda_home <- coef(fit_form)["at_home"]
@@ -241,16 +267,25 @@ lambda_form <- coef(fit_form)["form"]
 lambda_pitcher_era <- coef(fit_form)["pitcher_era"]
 ```
 
-**Create Dataframe with Theoretical Win Probabilities**
+**Create Dataframe with Theoretical Home Win Probabilities:**
+
+We create a new dataframe containing theoretical home win probabilities for each game in the MLB regular season.
 
 ```{r}
 preds_df <- results %>% 
     mutate(home_win_prob = Home_Win_Prob(home_team, away_team, Home_Pitcher_ERA, Away_Pitcher_ERA, home_team_form, away_team_form))
 ```
 
-**Distribution of Wins**
+**Distribution of Wins:**
+
+We wish to estimate how often the Dodgers finish with the best record in baseball. To answer this question, it is helpful to visualize the win distribution for each MLB team.
+
+This distribution is an approximation (as it is obtained from just 100 simulations) but it helps us visualize the number of wins each MLB team would earn if we simulated the MLB regular season a large number of times.
+
+It is clear from this visualization that the Dodgers would finish with the best record in Baseball at a very high rate if we simulated the MLB season a large number of times.
 
 ```{r}
+set.seed(380)
 n_sims <- 100
 
 simulations_results <- 
@@ -264,12 +299,16 @@ simulations_results <-
 
 **Simulation Results Grouped into a Single Dataframe**
 
+We wish to estimate the number of times the Dodgers would finish with the best record in baseball. And to do this, we must group the simulation results into a single dataframe.
+
 ```{r}
 simulation_df = bind_rows(simulations_results, .id = "sim_id")
 simulation_df
 ```
 
 **Simulation Results from all 100 Seasons Grouped into a Single Dataframe**
+
+And then we must group the simulations results from each season into a single dataframe.
 
 ```{r}
 hundred_season_summary_tmp_1 <- simulation_df %>% 
