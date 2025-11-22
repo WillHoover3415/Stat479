@@ -1,0 +1,183 @@
+---
+title: "Project 3 - Roy Son"
+author: "Roy Son"
+date: "2025-11-11"
+output: html_document
+---
+
+##Catch probability, what can change, connect reaction time to catch probability. Find intesne like defesneback is going to wrong reaction, difference between quick reaction time and late reaction time. 
+
+```{r}
+library(tidyverse)
+```
+
+
+```{r}
+Supplementary_data = read_csv("supplementary_data.csv")
+ 
+Input_week1 = read_csv("input_2023_w01.csv")
+
+Output_week1 = read_csv("output_2023_w01.csv")
+```
+
+
+```{r}###
+Supplementary_data_sorted = Supplementary_data %>%
+  mutate(game_date == as.Date(game_date, format = "%m/%d/%Y"),
+         game_time_eastern = hms::as_hms(game_time_eastern),
+         game_clock_time = ms(game_clock))%>%
+  arrange(week, game_date, game_time_eastern,
+          quarter, desc(game_clock_time),down, yardline_number)
+```
+###Codes for Computing Actual Seperation 
+
+```{r} 
+#Identifying Targeted Receivers and DBs covering them. 
+Receiver_list_Week1 = Input_week1 %>%
+  filter(player_role == "Targeted Receiver")%>%
+  select(game_id, play_id, receiver_id = nfl_id, receiver_name = player_name, receiver_position = player_position)%>%distinct()
+
+DB_list_Week1 = Input_week1%>%
+  filter(player_role == "Defensive Coverage")%>%
+  select(game_id, play_id, db_id = nfl_id, db_name = player_name, db_position = player_position)%>% distinct()
+
+#Tracking Coordinates for Receivers and DB
+
+Target_Reciever_Week1 = Output_week1%>%
+  inner_join(Receiver_list_Week1, by = c("game_id", "play_id", "nfl_id" = "receiver_id"))%>%
+  select(game_id, play_id, frame_id, receiver_id = nfl_id, receiver_name, receiver_position,
+         receiver_x= x, receiver_y =y)
+
+Coverage_DB_Week1 = Output_week1%>%
+  inner_join(DB_list_Week1, by = c("game_id","play_id","nfl_id" = "db_id"))%>%
+  select(game_id, play_id, frame_id, db_id = nfl_id, db_name, db_position,
+         db_x = x, db_y =y)
+
+Receiver_DB_Week1 = Target_Reciever_Week1 %>%
+  inner_join(Coverage_DB_Week1, by = c("game_id","play_id","frame_id"))%>%
+  mutate(distance = sqrt((receiver_x - db_x)^2 +(receiver_y - db_y)^2))
+
+
+#computation 
+actual_seperation_week1 = Receiver_DB_Week1%>%
+  group_by(game_id,play_id, frame_id, receiver_id, receiver_name, receiver_position)%>%
+  slice_min(distance, n=1)%>%
+  ungroup()%>%
+  select(game_id, play_id, frame_id,
+         receiver_name, receiver_position,
+         db_name, db_position, 
+         receiver_x, receiver_y, 
+         db_x, db_y,
+         actual_seperation = distance)
+
+actual_seperation_with_context_week1 = actual_seperation_week1 %>%
+  left_join(Supplementary_data, by = c("game_id", "play_id"))
+```
+
+#Codes for computing Expected Seperation using Linear Regression 
+
+```{r}
+Seperation_week1 = Receiver_DB_Week1 %>%
+ group_by(game_id, play_id, frame_id) %>%
+  slice_min(distance, n =1)%>%
+  ungroup() %>%
+  arrange(game_id, play_id, frame_id)
+
+Seperation_week1 = Seperation_week1%>%
+  group_by(game_id, play_id)%>%
+  mutate(
+    lag_x = lag(receiver_x - db_x),
+    lag_y = lag(receiver_y - db_y),
+    lag_seperation = lag(distance)
+  ) %>% ungroup()
+
+Seperation_week1 = Seperation_week1 %>%
+  filter(!is.na(lag_seperation))
+
+Linear_regression = lm(
+  distance ~ lag_x + lag_y + lag_seperation,
+  data = Seperation_week1
+)
+
+Seperation_week1$expected_seperation = 
+  predict(Linear_regression, Seperation_week1)
+```
+
+
+##Combining Actual, Expected, Seperation Over Expected into week1. 
+
+```{r}
+week1 = actual_seperation_with_context_week1 %>%
+  left_join(
+    Seperation_week1 %>%
+      select(game_id, play_id, frame_id, expected_seperation),
+    by = c("game_id", "play_id", "frame_id")
+  )
+
+week1 = week1 %>%
+  select(
+    game_id, play_id, frame_id, 
+    receiver_name, receiver_position,
+    db_name, db_position, 
+    receiver_x, receiver_y, db_x, db_y, 
+    actual_seperation, expected_seperation, 
+    everything()
+  )
+
+week1 = week1 %>%
+  mutate(
+    seperation_over_expected = actual_seperation - expected_seperation)%>%
+  select(
+    game_id, play_id, frame_id, receiver_name, receiver_position, db_name,
+    db_position, receiver_x, receiver_y, db_x, db_y, actual_seperation,
+    expected_seperation, seperation_over_expected, everything()
+  )
+```
+
+
+
+
+
+###actual_seperation_with_context_week1 = actual_seperation_week1 %>%
+  left_join(Supplementary_data, by = c("game_id", "play_id"))%>%
+  mutate(
+    game_date = as.Date(game_date, format = "%m/%d/%Y"),
+    game_time_eastern = hms::as_hms(game_time_eastern),
+    game_clock_time = as.numeric(game_clock)
+  )%>%
+  arrange(
+    week, game_date, game_time_eastern, quarter, desc(game_clock_time),play_id,frame_id)
+
+
+### Over Expected given what factors, Conditonal expectation factors: Look at the play. This is what I want to forcast. At particular time, what seperation is at one time at the end of time - seperation: fit a model go look at every train the model. Just fine if it is a metric. Build a regression model. Try Linear, Gem, number of things. XG boost. One play one frame 
+
+
+
+
+
+
+
+###Separation of time: Distance betwween defender and receiver, Time of arrival(number of frames), Ball in the air, Pass/catch.
+## Way Defender moved changed the probability of catch. 
+## Conditioned on defesne coverage, and the route of receiver running, where on the field will they have the highest catch probability. 
+### Compared to where it have happened. 
+### Explosive plays vs cover 3. 
+### A*SEACH ALOGRITHEM for optimal pass 
+
+Come up with more ideas - 
+##Come up with a moment where the play is throw as an interception. 
+#Reduce the interception. 
+
+
+### Tell us what is happening in the game. 
+## Time of the ball is thrown that is the seperaton, time the ball gets there it is seperation. Cross classify receivers, which receivers are creating seperation. Which one is increasing that distance with the ball is thrown. We can see how they increase the seperation: goes up and down. Look at the rate of change. End goal we want to analyze: Expected Seperation - what is the sepeartion profile, paused in the midle of the game how much sepeartion would be created at the end of the game. Based on that, able to rewatch the play and say the receivers would be. What the actual end result is. What caused the change to happen. Conditioning on serveal factors. Compare the expected vs actual: issue - what did receiver do to seperate that. Train: Random Forest, how did they cause the seperation. Analysis in between. How did they create that space. 
+## Over Expected and find the metric. Sepeartion over expected: what else can we do that. 
+
+## IDea 2: Train the model and get expected seperation: moment the ball is thrown and prediciting the thing at the end. Take that exact model keep the output and input is not the ball is thrown but 10th of second later after ball is thrown. Go by frame by frame expected seperation. Watch the play over and visualize number.  Focus on long pass down field. Starts with lot of seperation, Filter: too short, way too open, Pass distance in coverage. 
+
+
+#position of receiver, defenseive back, where ball is given. 
+
+##Computation: Expected seperation: where the defensive back and receiver was located in the frame, where the ball is going, Sepeartion over expected: how open receiver was compared to expected value. 
+
+# Compute Seperation per time frame, then expected seperation, then seperaton over expected, then try to visualize the sepeartion over expected.  
