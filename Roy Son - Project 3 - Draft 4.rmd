@@ -1,0 +1,265 @@
+---
+title: "Roy Son - Project 3 - Draft 4"
+author: "Roy Son"
+date: "2025-11-28"
+output: html_document
+---
+
+###Library 
+```{r}
+library(tidyverse)
+library(xgboost)
+```
+
+### Loading csv files 
+```{r}
+Supplementary = read_csv("supplementary_data.csv")
+
+weeks = 1:9
+
+list_of_input = lapply(weeks, function(w) read_csv(paste0("input_2023_w", sprintf("%02d", w), ".csv")))
+
+list_of_output = lapply(weeks, function(w) read_csv(paste0("output_2023_w", sprintf("%02d", w), ".csv")))
+
+Input = bind_rows(list_of_input)
+Output = bind_rows(list_of_output)
+```
+
+
+###Codes for computing Actual Seperation 
+```{r}
+Receiver_list = Input %>%
+    filter(player_role == "Targeted Receiver") %>%
+  select(game_id, play_id, receiver_id = nfl_id,
+         receiver_name = player_name, receiver_position = player_position) %>%
+  distinct()
+
+DB_list = Input %>%
+  filter(player_role == "Defensive Coverage") %>%
+  select(game_id, play_id, db_id = nfl_id,
+         db_name = player_name, db_position = player_position) %>%
+  distinct()
+
+Tracking_Receiver = Output %>%
+   inner_join(Receiver_list, by = c("game_id", "play_id", "nfl_id" = "receiver_id")) %>%
+  select(game_id, play_id, frame_id, receiver_id = nfl_id, receiver_name,
+         receiver_position, receiver_x = x, receiver_y = y)
+
+Tracking_DB = Output %>%
+  inner_join(DB_list, by = c("game_id", "play_id", "nfl_id" = "db_id")) %>%
+  select(game_id, play_id, frame_id, db_id = nfl_id, db_name,
+         db_position, db_x = x, db_y = y)
+  
+Receiver_DB = Tracking_Receiver %>%
+  inner_join(Tracking_DB, by = c("game_id", "play_id", "frame_id"))%>%
+  mutate(distance = sqrt((receiver_x - db_x)^2+ (receiver_y - db_y)^2))
+
+Separation = Receiver_DB %>%
+  group_by(game_id, play_id, frame_id, receiver_id)%>%
+  slice_min(distance)%>%
+  ungroup()%>%
+  rename(actual_separation = distance)
+```
+
+
+### Steps to take before computing expectation separation 
+```{r}
+motion = Input %>%
+  select(game_id, play_id, nfl_id, frame_id, s,a,o,dir)
+
+Separation = Separation %>%
+  left_join(
+    motion %>% rename(receiver_id = nfl_id, receiver_s = s, receiver_a = a,
+                      receiver_o = o, receiver_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "receiver_id")
+  )
+
+Separation = Separation %>%
+  left_join(
+    motion %>%
+      rename(db_id = nfl_id, db_s = s, db_a = a, db_o = o, db_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "db_id")
+  )
+```
+
+
+### Expected Separation steps 
+```{r}
+Separation = Separation %>%
+  arrange(game_id, play_id, receiver_id, frame_id) %>%
+  group_by(game_id, play_id, receiver_id) %>%
+  mutate(
+    lag_sep = lag(actual_separation),
+    lag_receiver_x = lag(receiver_x),
+    lag_receiver_y = lag(receiver_y),
+    lag_db_x = lag(db_x),
+    lag_db_y = lag(db_y),
+    lag_x = lag(receiver_x - db_x),
+    lag_y = lag(receiver_y - db_y),
+    lag_receiver_s = lag(receiver_s),
+    lag_receiver_a = lag(receiver_a),
+    lag_receiver_o = lag(receiver_o),
+    lag_receiver_dir = lag(receiver_dir),
+    lag_db_s = lag(db_s),
+    lag_db_a = lag(db_a),
+    lag_db_o = lag(db_o),
+    lag_db_dir = lag(db_dir)
+  ) %>%
+  ungroup()
+
+Separation = Separation %>%
+  select(-any_of("week"))%>%
+  left_join(
+    Supplementary %>%
+      select(game_id, play_id, week)%>%
+      mutate(week = as.numeric(week)),
+    by = c("game_id", "play_id")
+  )
+
+Separation_train = Separation %>%
+  filter(!is.na(lag_sep))
+```
+
+
+### Test and Train 
+```{r}
+train_data_frame = Separation_train %>% filter(week <= 6)
+train_label = train_data_frame$actual_separation
+test_data_frame = Separation_train %>% filter(week %in% 7:9)
+```
+
+## Building XGBoost 
+```{r}
+features = c("lag_sep", "lag_x", "lag_y", "lag_receiver_x", "lag_receiver_y",
+             "lag_db_x", "lag_db_y", "lag_receiver_s", "lag_receiver_a",
+             "lag_receiver_o", "lag_receiver_dir", "lag_db_s", "lag_db_a",
+             "lag_db_o", "lag_db_dir")
+
+train_matrix = as.matrix(train_data_frame[,features])
+test_matrix = as.matrix(test_data_frame[,features])
+
+model = xgboost(
+  data = train_matrix, 
+  label = train_label,
+  nrounds = 500,
+  eta = 0.05, 
+  max_depth = 6, 
+  verbose = 1, 
+  objective = "reg:squarederror"
+)
+```
+
+
+### computing expected Separation and SOE(Separation over Expected)
+```{r}
+test_data_frame$expected_separation = predict(model, test_matrix)
+
+test_data_frame = test_data_frame %>%
+  mutate(SOE = actual_separation - expected_separation)
+
+test_data_frame = test_data_frame %>%
+  select(game_id, play_id, frame_id, receiver_id,
+         receiver_name, receiver_position, db_id,
+         db_name, db_position, receiver_x, receiver_y,
+         db_x, db_y, actual_separation, expected_separation, SOE)%>%
+  arrange(game_id, play_id, frame_id)
+
+supplementary_for_test_df = Supplementary %>%
+  select(
+    game_id, play_id,
+    season, week, game_date, game_time_eastern,
+    home_team_abbr, visitor_team_abbr,
+    quarter, game_clock,
+    down, yards_to_go,
+    play_description,
+    pass_result,
+    route_of_targeted_receiver,
+    team_coverage_man_zone,
+    team_coverage_type
+  )
+
+test_data_frame = test_data_frame %>%
+  left_join(supplementary_for_test_df, by = c("game_id", "play_id"))
+```
+
+
+### Visualization attempt for 2D 
+```{r}
+visualization = function(play_id_){
+  df = test_data_frame %>%
+    filter(play_id == play_id_)%>%
+    arrange(frame_id)
+  if(nrow(df)==0){
+    stop("No rows found for that play_id in test_data_frame.")
+  }
+  play_title = paste0(
+    "Play", play_id_, "|",
+    df$home_team_abbr[1], "vs" , df$visitor_team_abbr[1],
+    "| Q", df$quarter[1], " ", df$game_clock[1]
+  )
+  play_subtitle = df$play_description[1]
+  
+    ggplot(df, aes(x = receiver_x, y = receiver_y))+
+      geom_path(aes(group = receiver_id), alpha = 0.5)+
+      geom_point(aes(color = SOE), size = 4, alpha = 0.5)+
+      geom_point(aes(x = db_x, y = db_y), color = "black", size = 4)+
+      geom_segment(aes(x = receiver_x, y = receiver_y,
+                       xend = db_x, yend = db_y),
+                   alpha = 0.5)+
+      scale_color_gradient2(low = "red", mid = "yellow", high = "green", name = "SOE")+
+      coord_fixed(xlim = c(0,120), ylim = c(0,50))+
+      labs(
+        title = play_title, 
+        subtitle = play_subtitle, 
+        x = "Field X(yards)",
+        y = "Field Y (yards)"
+      )+theme_minimal()
+}
+
+visualization(3903)
+```
+
+
+### Visualization attempt for 3D
+```{r}
+library(gganimate)
+
+visualize_play_animated = function(play_id_){
+  df = test_data_frame %>%
+    filter(play_id == play_id_)%>%
+    arrange(frame_id)
+  if (nrow(df) == 0){
+    stop("No rows found for that play_id in test_data_frame.")
+  }
+   play_title = paste0(
+    "Play", play_id_, "|",
+    df$home_team_abbr[1], "vs" , df$visitor_team_abbr[1],
+    "| Q", df$quarter[1], " ", df$game_clock[1]
+  )
+  play_subtitle = df$play_description[1]
+  animation_plot = ggplot(df)+
+    geom_path(aes(x = receiver_x, y = receiver_y, group = receiver_id),
+              alpha = 0.25)+
+    geom_point(aes(x = receiver_x, y = receiver_y, color =SOE),
+               size =5)+
+    geom_point(aes(x = db_x, db_y), color = "black", size = 5)+
+    geom_segment(aes(x = receiver_x, y = receiver_y, xend = db_x, yend = db_y, color = SOE),
+                 alpha = 0.5)+
+    scale_color_gradient2(low = "red", mid = "yellow", high = "green", name = "SOE")+
+    coord_fixed(xlim = c(0,120), ylim = c(0,55))+
+    labs(title = play_title, 
+         subtitle = paste0(play_subtitle, "\nFrame:{closest_state}"),
+         x = "Field X (yards)",
+         y = "Field Y (yards)")+
+    theme_minimal()+
+    transition_states(
+      frame_id, state_length = 2, transition_length = 0.5)
+  
+  animate(animation_plot, nframes = length(unique(df$frame_id)),
+          width = 1000, height = 500, renderer = gganimate::gifski_renderer())
+}
+    
+         
+visualize_play_animated(3903)
+```
+
