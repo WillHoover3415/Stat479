@@ -1,0 +1,333 @@
+---
+title: "Roy Son - Project 3: Technical Report"
+author: "Roy Son"
+date: "2025-12-02"
+output: html_document
+---
+
+
+###  Downloading Library 
+```{r}
+library(tidyverse)
+library(xgboost)
+```
+
+>[We begin by loading two libraries required for future work. The first package we will use is the tidyverse. This package includes useful components, such as dplyr, which we will use to join player-tracking tables, compute separation and lag-based movement features, and filter the training and testing data. Tidyverse also includes ggplot, which we will use for static visualizations, such as heatmaps and spatial overlays of receiver and DB. The second package we will use is XGBoost. XGBoost would serve as the predictive model to estimate expected separation, which we will talk about in more detail later, at each frame given the contextual features available from previous frames.] 
+
+### Loading Supplmentary and CSVs for Input weeks and Output Weeks 
+
+```{r}
+Supplementary = read_csv("supplementary_data.csv")
+
+weeks = 1:18
+
+list_of_output = lapply(weeks, function(w) read_csv(paste0("output_2023_w", sprintf("%02d", w), ".csv")))
+
+list_of_input = lapply(weeks, function(w) read_csv(paste0("input_2023_w", sprintf("%02d", w), ".csv")))
+```
+
+>[First, we import the suplementary play level dataset and the weekly tracking data for both player input and positional output. The input files contain pre snap player information(position, role, etc.), while the output files contain the raw spatial coordiantes of each player sampled at every frame after the ball is thrown. Since each week is stored as a separate CSV file, we read all weeks into memeory. So we loop through each week to import the corresponding player files. Then use "lapply()" to avoid manually loading 18 separate CSVs, and "sprintf("%02d",w)" ensures matching the offical NFL Big Data Bowl naming convet  ]
+
+### Create Join Functions - attaching playdata to each player row 
+
+```{r}
+join_output = function(output_df, input_df, supp) {
+  
+  output_mod = output_df %>% 
+    left_join(
+      input_df %>% 
+        select(game_id, play_id, nfl_id, frame_id,
+               play_direction, absolute_yardline_number,
+               player_name, player_height, player_weight,
+               player_birth_date, player_position, player_side,
+               player_role, num_frames_output, ball_land_x, ball_land_y),
+      by = c("game_id", "play_id", "nfl_id", "frame_id")
+    ) %>%
+    left_join(
+      supp %>% 
+        select(game_id, play_id, quarter, down, yards_to_go,
+               possession_team, defensive_team, offense_formation,
+               route_of_targeted_receiver, team_coverage_man_zone,
+               team_coverage_type, yards_gained, expected_points_added, pass_result),
+      by = c("game_id", "play_id")
+    )
+  
+  output_mod
+}
+```
+
+
+```{r}
+join_input = function(input_df, supp) {
+  
+  input_mod = input_df %>% 
+    left_join(
+      supp %>% 
+        select(game_id, play_id, week, quarter, down, yards_to_go,
+               possession_team, defensive_team, offense_formation,
+               route_of_targeted_receiver, team_coverage_man_zone,
+               team_coverage_type, yards_gained, expected_points_added, pass_result),
+      by = c("game_id", "play_id")
+    )
+  
+  input_mod
+}
+```
+
+
+```{r}
+outputs <- list()
+
+for (i in 1:18) {
+  outputs[[i]] = join_output(list_of_output[[i]], list_of_input[[i]], Supplementary)
+}
+Output = bind_rows(outputs)
+```
+
+
+```{r}
+inputs <- list()
+
+for (i in 1:18) {
+  inputs[[i]] <- join_input(list_of_input[[i]], Supplementary)
+}
+
+Input = bind_rows(inputs)
+```
+
+
+### Computing Actaul Separation
+
+## Filter Players 
+```{r}
+Receiver_list = Input %>%
+    filter(player_role == "Targeted Receiver") %>%
+  select(game_id, play_id, receiver_id = nfl_id,
+         receiver_name = player_name, receiver_position = player_position) %>%
+  distinct()
+
+DB_list = Input %>%
+  filter(player_role == "Defensive Coverage") %>%
+  select(game_id, play_id, db_id = nfl_id,
+         db_name = player_name, db_position = player_position) %>%
+  distinct()
+```
+
+## Track receiver and DB movment after throw 
+```{r}
+Tracking_Receiver = Output %>%
+   inner_join(Receiver_list, by = c("game_id", "play_id", "nfl_id" = "receiver_id")) %>%
+  select(game_id, play_id, frame_id, receiver_id = nfl_id, receiver_name,
+         receiver_position, receiver_x = x, receiver_y = y,route_of_targeted_receiver,yards_gained, expected_points_added,
+         pass_result, down, yards_to_go)
+
+
+Tracking_DB = Output %>%
+  inner_join(DB_list, by = c("game_id", "play_id", "nfl_id" = "db_id")) %>%
+  select(game_id, play_id, frame_id, db_id = nfl_id, db_name,
+         db_position, db_x = x, db_y = y)
+```
+
+## Pair receiver to the closest DB and compute an actual distnace 
+```{r}
+Receiver_DB = Tracking_Receiver %>%
+  inner_join(Tracking_DB, by = c("game_id", "play_id", "frame_id"))%>%
+  mutate(distance = sqrt((receiver_x - db_x)^2+ (receiver_y - db_y)^2))
+```
+
+## Pick closest DB per frame 
+```{r}
+Separation = Receiver_DB %>%
+  group_by(game_id, play_id, frame_id, receiver_id)%>%
+  slice_min(distance)%>%
+  ungroup()%>%
+  rename(actual_separation = distance)
+```
+
+### Adding Motion features 
+```{r}
+motion = Input %>%
+  select(game_id, play_id, nfl_id, frame_id, s,a,o,dir)
+```
+
+## Add to receiver rows and DB rows 
+```{r}
+Separation = Separation %>%
+  left_join(
+    motion %>% rename(receiver_id = nfl_id, receiver_s = s, receiver_a = a,
+                      receiver_o = o, receiver_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "receiver_id")
+  )
+
+Separation = Separation %>%
+  left_join(
+    motion %>%
+      rename(db_id = nfl_id, db_s = s, db_a = a, db_o = o, db_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "db_id")
+  )
+```
+
+### Creating Lag features so we can compute from previous frame to next frame 
+```{r}
+Separation = Separation %>%
+  arrange(game_id, play_id, receiver_id, frame_id) %>%
+  group_by(game_id, play_id, receiver_id) %>%
+  mutate(
+    lag_sep = lag(actual_separation),
+    lag_receiver_x = lag(receiver_x),
+    lag_receiver_y = lag(receiver_y),
+    lag_db_x = lag(db_x),
+    lag_db_y = lag(db_y),
+    lag_x = lag(receiver_x - db_x),
+    lag_y = lag(receiver_y - db_y),
+    lag_receiver_s = lag(receiver_s),
+    lag_receiver_a = lag(receiver_a),
+    lag_receiver_o = lag(receiver_o),
+    lag_receiver_dir = lag(receiver_dir),
+    lag_db_s = lag(db_s),
+    lag_db_a = lag(db_a),
+    lag_db_o = lag(db_o),
+    lag_db_dir = lag(db_dir)
+  ) %>%
+  ungroup()
+
+Separation = Separation %>%
+  select(-any_of("week"))%>%
+  left_join(
+    Supplementary %>%
+      select(game_id, play_id, week)%>%
+      mutate(week = as.numeric(week)),
+    by = c("game_id", "play_id")
+  )
+```
+
+### Filter Usuable Frames 
+```{r}
+Separation = Separation %>%
+  filter(!is.na(lag_sep))%>%
+  filter(!is.na(route_of_targeted_receiver))
+```
+
+### Train and test splitting the model 
+```{r}
+train_df = Separation %>% filter(week <= 15)
+test_df = Separation %>% filter(week %in% 1:18)
+
+train_label = train_df$actual_separation
+
+features = c("lag_sep", "lag_x", "lag_y", "lag_receiver_x", "lag_receiver_y",
+             "lag_db_x", "lag_db_y", "lag_receiver_s", "lag_receiver_a",
+             "lag_receiver_o", "lag_receiver_dir", "lag_db_s", "lag_db_a",
+             "lag_db_o", "lag_db_dir")
+
+train_matrix = as.matrix(train_df[,features])
+test_matrix = as.matrix(test_df[,features])
+
+set.seed(215)
+
+model = xgboost(
+  data = train_matrix, 
+  label = train_label,
+  nrounds = 300, 
+  eta = 0.05,
+  max_depth = 6,
+  objective = "reg:squarederror"
+)
+```
+
+### Compute SOE 
+```{r}
+test_df$expected_separation = predict(model, test_matrix)
+
+test_df = test_df %>%
+  mutate(SOE = actual_separation - expected_separation)
+```
+
+### Model Performance Metrics 
+```{r}
+library(Metrics)
+rmse_value = rmse(test_df$actual_separation, test_df$expected_separation)
+mae_value = mae(test_df$actual_separation, test_df$expected_separation)
+
+tibble(
+  RMSE = rmse_value,
+  MAE = mae_value
+)
+```
+
+
+### Route type distribution of SOE - which routes generate more separation over expected
+```{r}
+test_df = test_df %>%
+  mutate(success = pass_result %in% c("C", "R"))
+
+route_summary = test_df %>%
+  group_by(route_of_targeted_receiver)%>%
+  summarize(
+    SOE = round(mean(SOE),3),
+    EPA = round(mean(expected_points_added),3),
+    Success_pct = round(mean(success)*100,2),
+    Total_plays = n()
+  )%>%
+  arrange(desc(SOE))
+
+tibble(route_summary)
+```
+
+```{r}
+route_summary_for_ggplot = test_df %>%
+  group_by(route_of_targeted_receiver)%>%
+  summarize(
+    mean_SOE = mean(SOE),
+    meidan_SOE = median(SOE),
+    count = n()
+  ) %>% arrange(desc(mean_SOE))
+
+ggplot(route_summary_for_ggplot, aes(x = reorder(route_of_targeted_receiver, mean_SOE), y = mean_SOE,
+                                     fill = route_of_targeted_receiver))+
+  geom_col()+
+  geom_text(aes(label = round(mean_SOE, 3)), size = 3)+
+  coord_flip()+
+  labs(
+    title = "Average Separation Over Expected by Route Type",
+    x = "Route Type",
+    y = "Average SOE (yards)"
+  )
+  
+```
+
+### Comparing SOE vs Pass Results or EPA or Yards Gained - answering the question of does greater space actually convert into success 
+
+```{r}
+ggplot(test_df, aes(x = SOE, y = yards_gained))+
+  geom_point(color = "black")+
+  geom_smooth(method = "loess", color = "red")+
+  labs(
+    title = "Relationship Between SOE and Yards Gained",
+    x = "Separation Over Expected",
+    y = "Yards Gained"
+  )
+```
+
+```{r}
+ggplot(test_df, aes(x = pass_result, y = SOE))+
+  geom_boxplot(fill = "blue")+
+  labs(
+    title = "SOE by Pass Result",
+    x = "Pass Outcome",
+    y = "Separation Over Expected"
+  )
+```
+
+```{r}
+ggplot(test_df, aes( x = SOE, y = expected_points_added))+
+  geom_point(color = "blue")+
+  geom_smooth(method = "lm", color = "black")+
+  labs(
+    title = "SOE vs Expected Points Added",
+    x = "Separation Over Expected",
+    y = "EPA"
+  )+theme_minimal()
+```
+
+
