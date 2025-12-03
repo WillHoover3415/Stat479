@@ -1,0 +1,205 @@
+---
+title: "Catch Probability Model"
+format: html
+editor: visual
+---
+
+```{r}
+###Library 
+install.packages("xgboost")
+library(tidyverse)
+library(xgboost)
+```
+
+```{r}
+### Loading csv files 
+Supplementary = read_csv("Supplementary Data/supplementary_data.csv")
+
+weeks = 1:9
+
+list_of_input = lapply(weeks, function(w) read_csv(paste0("Pre-Throw Data/input_2023_w", sprintf("%02d", w), ".csv")))
+
+list_of_output = lapply(weeks, function(w) read_csv(paste0("Post-Throw Data/output_2023_w", sprintf("%02d", w), ".csv")))
+
+Input = bind_rows(list_of_input)
+Output = bind_rows(list_of_output)
+```
+
+```{r}
+###Codes for computing Actual Seperation 
+Receiver_list = Input %>%
+    filter(player_role == "Targeted Receiver") %>%
+  select(game_id, play_id, receiver_id = nfl_id,
+         receiver_name = player_name, receiver_position = player_position) %>%
+  distinct()
+
+DB_list = Input %>%
+  filter(player_role == "Defensive Coverage") %>%
+  select(game_id, play_id, db_id = nfl_id,
+         db_name = player_name, db_position = player_position) %>%
+  distinct()
+
+Tracking_Receiver = Output %>%
+   inner_join(Receiver_list, by = c("game_id", "play_id", "nfl_id" = "receiver_id")) %>%
+  select(game_id, play_id, frame_id, receiver_id = nfl_id, receiver_name,
+         receiver_position, receiver_x = x, receiver_y = y)
+
+Tracking_DB = Output %>%
+  inner_join(DB_list, by = c("game_id", "play_id", "nfl_id" = "db_id")) %>%
+  select(game_id, play_id, frame_id, db_id = nfl_id, db_name,
+         db_position, db_x = x, db_y = y)
+  
+Receiver_DB = Tracking_Receiver %>%
+  inner_join(Tracking_DB, by = c("game_id", "play_id", "frame_id"))%>%
+  mutate(distance = sqrt((receiver_x - db_x)^2+ (receiver_y - db_y)^2))
+
+Separation = Receiver_DB %>%
+  group_by(game_id, play_id, frame_id, receiver_id)%>%
+  slice_min(distance)%>%
+  ungroup()%>%
+  rename(actual_separation = distance)
+```
+
+```{r}
+### Steps to take before computing expectation separation 
+motion = Input %>%
+  select(game_id, play_id, nfl_id, frame_id, s,a,o,dir)
+
+Separation = Separation %>%
+  left_join(
+    motion %>% rename(receiver_id = nfl_id, receiver_s = s, receiver_a = a,
+                      receiver_o = o, receiver_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "receiver_id")
+  )
+
+Separation = Separation %>%
+  left_join(
+    motion %>%
+      rename(db_id = nfl_id, db_s = s, db_a = a, db_o = o, db_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "db_id")
+  )
+```
+
+```{r}
+### Expected Separation steps 
+Separation = Separation %>%
+  arrange(game_id, play_id, receiver_id, frame_id) %>%
+  group_by(game_id, play_id, receiver_id) %>%
+  mutate(
+    lag_sep = lag(actual_separation),
+    lag_receiver_x = lag(receiver_x),
+    lag_receiver_y = lag(receiver_y),
+    lag_db_x = lag(db_x),
+    lag_db_y = lag(db_y),
+    lag_x = lag(receiver_x - db_x),
+    lag_y = lag(receiver_y - db_y),
+    lag_receiver_s = lag(receiver_s),
+    lag_receiver_a = lag(receiver_a),
+    lag_receiver_o = lag(receiver_o),
+    lag_receiver_dir = lag(receiver_dir),
+    lag_db_s = lag(db_s),
+    lag_db_a = lag(db_a),
+    lag_db_o = lag(db_o),
+    lag_db_dir = lag(db_dir)
+  ) %>%
+  ungroup()
+
+Separation = Separation %>%
+  select(-any_of("week"))%>%
+  left_join(
+    Supplementary %>%
+      select(game_id, play_id, week)%>%
+      mutate(week = as.numeric(week)),
+    by = c("game_id", "play_id")
+  )
+
+Separation_train = Separation %>%
+  filter(!is.na(lag_sep))
+```
+
+```{r}
+### Test and Train 
+train_data_frame = Separation_train %>% filter(week <= 6)
+train_label = train_data_frame$actual_separation
+test_data_frame = Separation_train %>% filter(week %in% 7:9)
+
+## Building XGBoost 
+features = c("lag_sep", "lag_x", "lag_y", "lag_receiver_x", "lag_receiver_y",
+             "lag_db_x", "lag_db_y", "lag_receiver_s", "lag_receiver_a",
+             "lag_receiver_o", "lag_receiver_dir", "lag_db_s", "lag_db_a",
+             "lag_db_o", "lag_db_dir")
+
+train_matrix = as.matrix(train_data_frame[,features])
+test_matrix = as.matrix(test_data_frame[,features])
+
+set.seed(479)
+model = xgboost(
+  data = train_matrix, 
+  label = train_label,
+  nrounds = 500,
+  eta = 0.05, 
+  max_depth = 6, 
+  verbose = 1, 
+  objective = "reg:squarederror"
+)
+```
+
+```{r}
+###Preparing Supplementary DF to be merged with Training DF
+Supplementary_for_catch_train <- Supplementary %>% 
+  select(game_id, play_id, route_of_targeted_receiver, pass_result) %>% 
+  mutate(route_of_targeted_receiver = as.factor(route_of_targeted_receiver)) %>% 
+  mutate(pass_result = case_when(
+    pass_result == "C" ~ 1,
+    pass_result == "I" ~ 0,
+    pass_result == "IN" ~ 0
+  ))
+
+###Creating SOE DF (for All Weeks (1-9))
+SOE_matrix = as.matrix(Separation_train[,features])
+SOE_df <- Separation_train %>% 
+  mutate(expected_separation = predict(model, SOE_matrix)) %>% 
+  mutate(SOE = actual_separation - expected_separation) %>% 
+  merge(Supplementary_for_catch_train, by = c("game_id", "play_id")) 
+```
+
+```{r}
+### Splitting Data into Training and Testing
+catch_prob_train <- SOE_df %>% 
+  filter(week <= 6) %>% 
+  filter(is.na(receiver_s) == FALSE)
+catch_prob_label = catch_prob_train$pass_result
+catch_prob_test = SOE_df %>% 
+  filter(week %in% 7:9)
+
+SOE_df$pass_result
+
+### Building Catch Probability Model
+catch_prob_features = c("lag_sep", "lag_x", "lag_y", "lag_receiver_x", "lag_receiver_y",
+             "lag_db_x", "lag_db_y", "lag_receiver_s", "lag_receiver_a",
+             "lag_receiver_o", "lag_receiver_dir", "lag_db_s", "lag_db_a",
+             "lag_db_o", "lag_db_dir", "expected_separation", "SOE")
+
+catch_prob_matrix = as.matrix(SOE_df[,catch_prob_features])
+catch_prob_train_matrix = as.matrix(catch_prob_train[,catch_prob_features])
+catch_prob_test_matrix = as.matrix(catch_prob_test[,catch_prob_features])
+
+set.seed(479)
+catch_prob_model = xgboost(
+  data = catch_prob_train_matrix, 
+  label = catch_prob_label,
+  nrounds = 500,
+  eta = 0.05, 
+  max_depth = 6, 
+  verbose = 1, 
+  objective = "binary:logistic"
+)
+```
+
+```{r}
+### Building Catch Prob DF
+catch_prob_df <- catch_prob_test %>% 
+  mutate(catch_prob = predict(catch_prob_model, catch_prob_test_matrix, type = "binary:logistic"))
+
+cor(catch_prob_df$SOE, catch_prob_df$catch_prob)
+```
