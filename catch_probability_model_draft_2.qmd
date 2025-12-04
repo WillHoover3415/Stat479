@@ -1,0 +1,352 @@
+---
+title: "Catch Probability Model Draft 2"
+format: html
+editor: visual
+---
+
+> We begin by loading two libraries required for future work. The first package we will use is the tidyverse. This package includes useful components, such as dplyr, which we will use to join player-tracking tables, compute separation and lag-based movement features, and filter the training and testing data. Tidyverse also includes ggplot, which we will use for static visualizations, such as heatmaps and spatial overlays of receiver and DB. The second package we will use is XGBoost. XGBoost would serve as the predictive model to estimate expected separation, which we will talk about in more detail later, at each frame given the contextual features available from previous frames.
+
+```{r}
+###  Downloading Library
+library(tidyverse)
+library(xgboost)
+```
+
+First, we import the suplementary play level dataset and the weekly tracking data for both player input and positional output. The input files contain pre snap player information(position, role, etc.), while the output files contain the raw spatial coordiantes of each player sampled at every frame after the ball is thrown. Since each week is stored as a separate CSV file, we read all weeks into memeory. So we loop through each week to import the corresponding player files. Then use "lapply()" to avoid manually loading 18 separate CSVs, and "sprintf("%02d",w)" ensures matching the offical NFL Big Data Bowl naming convention
+
+```{r}
+### Loading Supplmentary and CSVs for Input weeks and Output Weeks}
+Supplementary = read_csv("Supplementary Data/supplementary_data.csv")
+
+weeks = 1:18
+
+list_of_output = lapply(weeks, function(w) read_csv(paste0("Post-Throw Data/output_2023_w", sprintf("%02d", w), ".csv")))
+
+list_of_input = lapply(weeks, function(w) read_csv(paste0("Pre-Throw Data/input_2023_w", sprintf("%02d", w), ".csv")))
+```
+
+```{r}
+### Create Join Functions - attaching playdata to each player row 
+
+join_output = function(output_df, input_df, supp) {
+  
+  output_mod = output_df %>% 
+    left_join(
+      input_df %>% 
+        select(game_id, play_id, nfl_id, frame_id,
+               play_direction, absolute_yardline_number,
+               player_name, player_height, player_weight,
+               player_birth_date, player_position, player_side,
+               player_role, num_frames_output, ball_land_x, ball_land_y),
+      by = c("game_id", "play_id", "nfl_id", "frame_id")
+    ) %>%
+    left_join(
+      supp %>% 
+        select(game_id, play_id, quarter, down, yards_to_go,
+               possession_team, defensive_team, offense_formation,
+               route_of_targeted_receiver, team_coverage_man_zone,
+               team_coverage_type, yards_gained, expected_points_added, pass_result),
+      by = c("game_id", "play_id")
+    )
+  
+  output_mod
+}
+
+join_input = function(input_df, supp) {
+  
+  input_mod = input_df %>% 
+    left_join(
+      supp %>% 
+        select(game_id, play_id, week, quarter, down, yards_to_go,
+               possession_team, defensive_team, offense_formation,
+               route_of_targeted_receiver, team_coverage_man_zone,
+               team_coverage_type, yards_gained, expected_points_added, pass_result),
+      by = c("game_id", "play_id")
+    )
+  
+  input_mod
+}
+
+outputs <- list()
+
+for (i in 1:18) {
+  outputs[[i]] = join_output(list_of_output[[i]], list_of_input[[i]], Supplementary)
+}
+Output = bind_rows(outputs)
+
+inputs <- list()
+
+for (i in 1:18) {
+  inputs[[i]] <- join_input(list_of_input[[i]], Supplementary)
+}
+
+Input = bind_rows(inputs)
+```
+
+```{r}
+### Computing Actaul Separation
+
+## Filter Players 
+
+Receiver_list = Input %>%
+    filter(player_role == "Targeted Receiver") %>%
+  select(game_id, play_id, receiver_id = nfl_id,
+         receiver_name = player_name, receiver_position = player_position) %>%
+  distinct()
+
+DB_list = Input %>%
+  filter(player_role == "Defensive Coverage") %>%
+  select(game_id, play_id, db_id = nfl_id,
+         db_name = player_name, db_position = player_position) %>%
+  distinct()
+```
+
+```{r}
+## Track receiver and DB movment after throw 
+
+Tracking_Receiver = Output %>%
+   inner_join(Receiver_list, by = c("game_id", "play_id", "nfl_id" = "receiver_id")) %>%
+  select(game_id, play_id, frame_id, receiver_id = nfl_id, receiver_name,
+         receiver_position, receiver_x = x, receiver_y = y,route_of_targeted_receiver,yards_gained, expected_points_added,
+         pass_result, down, yards_to_go)
+
+
+Tracking_DB = Output %>%
+  inner_join(DB_list, by = c("game_id", "play_id", "nfl_id" = "db_id")) %>%
+  select(game_id, play_id, frame_id, db_id = nfl_id, db_name,
+         db_position, db_x = x, db_y = y)
+```
+
+```{r}
+## Pair receiver to the closest DB and compute an actual distnace 
+
+Receiver_DB = Tracking_Receiver %>%
+  inner_join(Tracking_DB, by = c("game_id", "play_id", "frame_id"))%>%
+  mutate(distance = sqrt((receiver_x - db_x)^2+ (receiver_y - db_y)^2))
+
+## Pick closest DB per frame 
+
+Separation = Receiver_DB %>%
+  group_by(game_id, play_id, frame_id, receiver_id)%>%
+  slice_min(distance)%>%
+  ungroup()%>%
+  rename(actual_separation = distance)
+
+### Adding Motion features 
+
+motion = Input %>%
+  select(game_id, play_id, nfl_id, frame_id, s,a,o,dir)
+
+## Add to receiver rows and DB rows 
+
+Separation = Separation %>%
+  left_join(
+    motion %>% rename(receiver_id = nfl_id, receiver_s = s, receiver_a = a,
+                      receiver_o = o, receiver_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "receiver_id")
+  )
+
+Separation = Separation %>%
+  left_join(
+    motion %>%
+      rename(db_id = nfl_id, db_s = s, db_a = a, db_o = o, db_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "db_id")
+  )
+
+### Creating Lag features so we can compute from previous frame to next frame 
+
+Separation = Separation %>%
+  arrange(game_id, play_id, receiver_id, frame_id) %>%
+  group_by(game_id, play_id, receiver_id) %>%
+  mutate(
+    lag_sep = lag(actual_separation),
+    lag_receiver_x = lag(receiver_x),
+    lag_receiver_y = lag(receiver_y),
+    lag_db_x = lag(db_x),
+    lag_db_y = lag(db_y),
+    lag_x = lag(receiver_x - db_x),
+    lag_y = lag(receiver_y - db_y),
+    lag_receiver_s = lag(receiver_s),
+    lag_receiver_a = lag(receiver_a),
+    lag_receiver_o = lag(receiver_o),
+    lag_receiver_dir = lag(receiver_dir),
+    lag_db_s = lag(db_s),
+    lag_db_a = lag(db_a),
+    lag_db_o = lag(db_o),
+    lag_db_dir = lag(db_dir)
+  ) %>%
+  ungroup()
+
+Separation = Separation %>%
+  select(-any_of("week"))%>%
+  left_join(
+    Supplementary %>%
+      select(game_id, play_id, week)%>%
+      mutate(week = as.numeric(week)),
+    by = c("game_id", "play_id")
+  )
+
+### Filter Usuable Frames 
+
+Separation = Separation %>%
+  filter(!is.na(lag_sep))%>%
+  filter(!is.na(route_of_targeted_receiver))
+
+### Train and test splitting the model 
+
+train_df = Separation %>% filter(week <= 15)
+test_df = Separation %>% filter(week %in% 1:18)
+
+train_label = train_df$actual_separation
+
+features = c("lag_sep", "lag_x", "lag_y", "lag_receiver_x", "lag_receiver_y",
+             "lag_db_x", "lag_db_y", "lag_receiver_s", "lag_receiver_a",
+             "lag_receiver_o", "lag_receiver_dir", "lag_db_s", "lag_db_a",
+             "lag_db_o", "lag_db_dir")
+
+train_matrix = as.matrix(train_df[,features])
+test_matrix = as.matrix(test_df[,features])
+
+set.seed(215)
+
+model = xgboost(
+  data = train_matrix, 
+  label = train_label,
+  nrounds = 300, 
+  eta = 0.05,
+  max_depth = 6,
+  objective = "reg:squarederror"
+)
+```
+
+```{r}
+### Compute SOE 
+test_df$expected_separation = predict(model, test_matrix)
+
+test_df = test_df %>%
+  mutate(SOE = actual_separation - expected_separation)
+```
+
+**Preparing SOE Dataframe for Catch Probability Model:**
+
+After creating a new dataframe with expected separation and SOE, we need to prepare this dataframe so that it can be used to train our catch probability model.
+
+This involves changing the pass result outcomes ("C" for Completed Catch, "I" for Incompletion, and "IN" for Intereception) to binary outcomes (0 for a Incomplete Pass or an Interception and 1 for a Completed Pass).
+
+```{r}
+SOE_df <- test_df %>% 
+  mutate(pass_result = case_when(
+    pass_result == "C" ~ 1,
+    pass_result == "I" ~ 0,
+    pass_result == "IN" ~ 0
+  ))
+```
+
+**Creating our Catch Probability Model:**
+
+After making this change to the pass_result variable, we are ready to build our catch probability model.
+
+```{r}
+### Building Catch Probability Model
+catch_prob_label = SOE_df$pass_result
+catch_prob_features = c("lag_sep", "lag_x", "lag_y", "lag_receiver_x", "lag_receiver_y",
+             "lag_db_x", "lag_db_y", "lag_receiver_s", "lag_receiver_a",
+             "lag_receiver_o", "lag_receiver_dir", "lag_db_s", "lag_db_a",
+             "lag_db_o", "lag_db_dir", "expected_separation", "SOE")
+
+catch_prob_matrix = as.matrix(SOE_df[,catch_prob_features])
+
+set.seed(479)
+catch_prob_model = xgboost(
+  data = catch_prob_matrix, 
+  label = catch_prob_label,
+  nrounds = 500,
+  eta = 0.05, 
+  max_depth = 6, 
+  verbose = 1, 
+  objective = "binary:logistic"
+)
+```
+
+**Creating Catch Probability Dataframe:**
+
+After building our catch probability model, we use it to predict catch probabilities for frames for plays from weeks 1-18.
+
+```{r}
+### Building Catch Prob DF (Frames from plays from Weeks 1-18)
+catch_prob_df <- SOE_df %>% 
+  mutate(catch_prob = predict(catch_prob_model, catch_prob_matrix, type = "binary:logistic"))
+
+cor(catch_prob_df$expected_separation, catch_prob_df$catch_prob)
+```
+
+**Assessing Model Accuracy & Variability:**
+
+To assess our model's accuracy and variability, we created a large number of training-testing splits, and for each split, trained our model using the training data and assessed it's accuracy on the testing data.
+
+We then loaded the accuracy from each split into a vector and computed the mean and variance over all the splits.
+
+We used two metrics for assessing model accuracy:
+
+1.  RMSE
+2.  MAE
+
+```{r}
+library(Metrics)
+##Set number of simulations to 10
+n_sims <- 10
+
+##Initialize RMSE and MAE vectors
+test_rmse <- rep(NA, times = n_sims)
+test_mae <- rep(NA, times = n_sims)
+
+##Set our training df to be 75% of the full df
+n_row <- nrow(SOE_df)
+n_train <- floor(0.75 * n_row)
+
+##Create 10 training-testing splits. For each split, we train the model using the training df and make predictions on the testing dataframe.
+for(r in 1:n_sims){
+  set.seed(479+r)
+  train_data <-
+    SOE_df |>
+    dplyr::slice_sample(n = n_train)
+  test_data <-
+    SOE_df |>
+    dplyr::anti_join(y = train_data, by = c("game_id", "frame_id", "receiver_id", "play_id")) 
+
+  train_matrix <- as.matrix(train_data[,catch_prob_features])
+  test_matrix <- as.matrix(test_data[,catch_prob_features])
+  train_label <- train_data$pass_result
+  
+  fit <- xgboost(
+  data = train_matrix, 
+  label = train_label,
+  nrounds = 500,
+  eta = 0.05, 
+  max_depth = 6, 
+  verbose = 1, 
+  objective = "binary:logistic"
+)
+  
+##Here, we are predicting the probability that a catch is made.
+  
+  test_preds <-
+   suppressWarnings(predict(object = fit,
+           newdata = test_matrix,
+           type = "binary:logistic"))
+  
+  test_data$test_probs <- test_preds
+  
+##Compute log loss on the training and testing sets and store the values in the training and testing log loss vectors.
+  test_rmse[r] <-
+    rmse(test_data$pass_result, test_data$test_probs)
+  test_mae[r] <-
+    mae(test_data$pass_result, test_data$test_probs)
+}
+
+##Print out the variance and average of rmse and mae over 10 splits.
+cat("Dist testing rmse:", round(mean(test_rmse), digits = 3), "\n"); 
+cat("Dist testing rmse:", round(var(test_rmse), digits = 3), "\n");
+cat("Variance of testing mae:", round(mean(test_mae), digits = 3), "\n");
+cat("Variance of testing rmse:", round(var(test_mae), digits = 3), "\n")
+```
