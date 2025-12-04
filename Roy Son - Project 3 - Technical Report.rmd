@@ -1,0 +1,359 @@
+---
+title: "Roy Son - Project 3 - Technical Report"
+author: "Roy Son"
+date: "2025-12-04"
+output: html_document
+---
+
+###  Downloading Library 
+```{r}
+library(tidyverse)
+library(xgboost)
+```
+
+>[We start by loading the tidyverse and xgboost packages. Tidyverse provides tools for data preparation, including dplyr for joining tables and filtering players. We use ggplot from tidyverse for visualizations. Later, xgboost trains a gradient-boosted regression model to learn the expected receiver separation at each frame.]
+
+### Loading Supplementary and CSVs for Input weeks and Output Weeks 
+
+```{r}
+Supplementary = read_csv("supplementary_data.csv")
+
+weeks = 1:18
+
+list_of_output = lapply(weeks, function(w) read_csv(paste0("output_2023_w", sprintf("%02d", w), ".csv")))
+
+list_of_input = lapply(weeks, function(w) read_csv(paste0("input_2023_w", sprintf("%02d", w), ".csv")))
+```
+
+>[The NFL Big Data Bowl provides weekly datasets in two views: input (pre-throw) and output (post-throw). We load all 18 weeks using lapply(), which iterates over each week and imports its CSV file. Loading files as lists before joining avoids week-based bias. We also load the Supplementary dataset, which attaches contextual play-level variables such as down, yards gained, route, pass result, and expected points added. These attributes, absent from the raw tracking files, are critical for football context.]
+
+### Create Join Functions - attaching playdata to each player row 
+
+```{r}
+join_output = function(output_df, input_df, supp) {
+  
+  output_mod = output_df %>% 
+    left_join(
+      input_df %>% 
+        select(game_id, play_id, nfl_id, frame_id,
+               play_direction, absolute_yardline_number,
+               player_name, player_height, player_weight,
+               player_birth_date, player_position, player_side,
+               player_role, num_frames_output, ball_land_x, ball_land_y),
+      by = c("game_id", "play_id", "nfl_id", "frame_id")
+    ) %>%
+    left_join(
+      supp %>% 
+        select(game_id, play_id, quarter, down, yards_to_go,
+               possession_team, defensive_team, offense_formation,
+               route_of_targeted_receiver, team_coverage_man_zone,
+               team_coverage_type, yards_gained, expected_points_added, pass_result),
+      by = c("game_id", "play_id")
+    )
+  
+  output_mod
+}
+```
+
+>[Raw output tracking does not carry information about the player or the play context. We fix this problem by using "join_output()." This function enriches each frame-level tracking row with player direction and field location, the ball's final landing point, and full contextual data (down, yards gained, EPA, route type). By merging player state (input) with movement (output) and lay context (supplementary), each row now contains both where the player is and what football situation they are in.]
+
+```{r}
+join_input = function(input_df, supp) {
+  
+  input_mod = input_df %>% 
+    left_join(
+      supp %>% 
+        select(game_id, play_id, week, quarter, down, yards_to_go,
+               possession_team, defensive_team, offense_formation,
+               route_of_targeted_receiver, team_coverage_man_zone,
+               team_coverage_type, yards_gained, expected_points_added, pass_result),
+      by = c("game_id", "play_id")
+    )
+  
+  input_mod
+}
+```
+
+>[The input table records one row per player per play, not per frame. We join contextual variables to the input table so that we can later identify targeted receivers and filter DBs. This ensures classification of receiver vs DB is fully contextualized before computing distance or lag features.]
+
+```{r}
+outputs <- list()
+
+for (i in 1:18) {
+  outputs[[i]] = join_output(list_of_output[[i]], list_of_input[[i]], Supplementary)
+}
+Output = bind_rows(outputs)
+```
+```{r}
+inputs <- list()
+
+for (i in 1:18) {
+  inputs[[i]] <- join_input(list_of_input[[i]], Supplementary)
+}
+
+Input = bind_rows(inputs)
+```
+
+>[Each week is processed independently to maintain consistency. We then bind all weeks together. "Output"shows a frame-level movement table, and "Input" shows a play-level table used for player classification. This unified format ensures modeling treats every play identically, regardless of week or opponent.]
+
+### Computing Actaul Separation
+
+>[The SOE metric is based on how much open space the receiver achieves relative ot model expectations. To build that model, we must first measure actual separation at every frame.]
+
+## Filter Players 
+```{r}
+Receiver_list = Input %>%
+    filter(player_role == "Targeted Receiver") %>%
+  select(game_id, play_id, receiver_id = nfl_id,
+         receiver_name = player_name, receiver_position = player_position) %>%
+  distinct()
+
+DB_list = Input %>%
+  filter(player_role == "Defensive Coverage") %>%
+  select(game_id, play_id, db_id = nfl_id,
+         db_name = player_name, db_position = player_position) %>%
+  distinct()
+```
+
+>["Input" data frame contains the role labels assigned by tracking staff. We filter to retain exactly one targeted receiver per play and all defensive players assigned to coverage. This process ensures all calculated separations are relevant ot he intended pass outcome.]
+
+## Track receiver and DB movment after throw 
+```{r}
+Tracking_Receiver = Output %>%
+   inner_join(Receiver_list, by = c("game_id", "play_id", "nfl_id" = "receiver_id")) %>%
+  select(game_id, play_id, frame_id, receiver_id = nfl_id, receiver_name,
+         receiver_position, receiver_x = x, receiver_y = y,route_of_targeted_receiver,yards_gained, expected_points_added,
+         pass_result, down, yards_to_go)
+
+
+Tracking_DB = Output %>%
+  inner_join(DB_list, by = c("game_id", "play_id", "nfl_id" = "db_id")) %>%
+  select(game_id, play_id, frame_id, db_id = nfl_id, db_name,
+         db_position, db_x = x, db_y = y)
+```
+
+>[We merge the "Output" dataframe with the labeled receiver and DB. The resulting data frame assigns "(receiver_x, receiver_y) coordinates per frame for the targeted receiver and "(db_x, db_y)" coordinates per frame for each defender while carrying the context variables (route, EPA, pass outcome, down, etc.). These data frames form the basis for computing spatial separation on every frame of every pass play.]
+
+## Pair receiver to the closest DB and compute an actual distnace 
+```{r}
+Receiver_DB = Tracking_Receiver %>%
+  inner_join(Tracking_DB, by = c("game_id", "play_id", "frame_id"))%>%
+  mutate(distance = sqrt((receiver_x - db_x)^2+ (receiver_y - db_y)^2))
+```
+
+>[At every frame, multiple defensive backs may appear near the targeted receiver. To quantify coverage tightness, we pair each receiver frame with every defender frame occurring at the same play and moment in time. Using the player tracking coordinates, we compute the Euclidean distance between the receiver and each DB. This step produces a full set of receiver-DB distance pairs, one for every possible coverage matchup at that frame.]
+
+## Pick closest DB per frame 
+```{r}
+Separation = Receiver_DB %>%
+  group_by(game_id, play_id, frame_id, receiver_id)%>%
+  slice_min(distance)%>%
+  ungroup()%>%
+  rename(actual_separation = distance)
+```
+
+>[Since only the closest defender significantly limits the receiver's space, we simplify by selecting the smallest distance for each frame. This yields a single "actual_separation" value per frame, indicating how closely the targeted receiver is covered. This metric forms the basis for our expected separation model.]
+
+### Adding Motion features 
+```{r}
+motion = Input %>%
+  select(game_id, play_id, nfl_id, frame_id, s,a,o,dir)
+```
+
+>[After calculating the actual separation between each targeted receiver and the nearest coverage defender, we annotate each frame with player movement features derived from the raw tracking data. The Input tables include frame-level variables for each player: speed in yards per second (s), acceleration in yards per second squared (a), orientation (o, the direction the player faces in degrees), and direction (dir, the player's movement angle). We collect these features in a separate motion data frame, indexed by (game_id, play_id, nfl_id, frame_id), to enable consistent joining to both receivers and defenders.]
+
+## Add to receiver rows and DB rows 
+```{r}
+Separation = Separation %>%
+  left_join(
+    motion %>% rename(receiver_id = nfl_id, receiver_s = s, receiver_a = a,
+                      receiver_o = o, receiver_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "receiver_id")
+  )
+
+Separation = Separation %>%
+  left_join(
+    motion %>%
+      rename(db_id = nfl_id, db_s = s, db_a = a, db_o = o, db_dir = dir),
+    by = c("game_id", "play_id", "frame_id", "db_id")
+  )
+```
+
+>[We merged these variables twice: once keyed to the receiver's "nfl_id," and once keyed to the DB's "nfl_id." For clarity, we renamed each set with specific prefixes (e.g.,"receiver_s", "db_s"). This step ensures our modeling process has access to the relative motion context at every frame. These player attributes are critical inputs when estimating expected separation, which is inherently driven by movement from the previous time step.]
+
+### Creating Lag features so we can compute from previous frame to next frame 
+```{r}
+Separation = Separation %>%
+  arrange(game_id, play_id, receiver_id, frame_id) %>%
+  group_by(game_id, play_id, receiver_id) %>%
+  mutate(
+    lag_sep = lag(actual_separation),
+    lag_receiver_x = lag(receiver_x),
+    lag_receiver_y = lag(receiver_y),
+    lag_db_x = lag(db_x),
+    lag_db_y = lag(db_y),
+    lag_x = lag(receiver_x - db_x),
+    lag_y = lag(receiver_y - db_y),
+    lag_receiver_s = lag(receiver_s),
+    lag_receiver_a = lag(receiver_a),
+    lag_receiver_o = lag(receiver_o),
+    lag_receiver_dir = lag(receiver_dir),
+    lag_db_s = lag(db_s),
+    lag_db_a = lag(db_a),
+    lag_db_o = lag(db_o),
+    lag_db_dir = lag(db_dir)
+  ) %>%
+  ungroup()
+
+Separation = Separation %>%
+  select(-any_of("week"))%>%
+  left_join(
+    Supplementary %>%
+      select(game_id, play_id, week)%>%
+      mutate(week = as.numeric(week)),
+    by = c("game_id", "play_id")
+  )
+```
+
+>[To estimate expected separation, the model needs to learn how positions and movement change from one frame to the next. Whether a receiver gets more or less open depends on their current and previous location, speed, acceleration, and direction—as well as the same features for the nearest DB (defensive back). Lag-based features capture this by recording the value from the previous frame. For example, lag(X) is the value of variable X one frame earlier; lag_sep is the separation on the prior frame; lag_receiver_s is the receiver speed previously; lag_db_a is the DB's acceleration on the previous frame. Including these features helps the model understand continuous motion and player transitions.]
+
+### Filter Usuable Frames 
+```{r}
+Separation = Separation %>%
+  filter(!is.na(lag_sep))%>%
+  filter(!is.na(route_of_targeted_receiver))
+```
+
+>[We keep only observations where lag (previous frame) information is available, since separation can't be predicted for the first frame after the throw. Also, we use only plays with recorded route labels (receiver's path), which will later allow us to evaluate Separation Over Expected (SOE) by route type.]
+
+### Train and test splitting the model 
+```{r, include = FALSE}
+train_df = Separation %>% filter(week <= 15)
+test_df = Separation %>% filter(week %in% 1:18)
+
+train_label = train_df$actual_separation
+
+features = c("lag_sep", "lag_x", "lag_y", "lag_receiver_x", "lag_receiver_y",
+             "lag_db_x", "lag_db_y", "lag_receiver_s", "lag_receiver_a",
+             "lag_receiver_o", "lag_receiver_dir", "lag_db_s", "lag_db_a",
+             "lag_db_o", "lag_db_dir")
+
+train_matrix = as.matrix(train_df[,features])
+test_matrix = as.matrix(test_df[,features])
+
+set.seed(215)
+
+model = xgboost(
+  data = train_matrix, 
+  label = train_label,
+  nrounds = 300, 
+  eta = 0.05,
+  max_depth = 6,
+  objective = "reg:squarederror"
+)
+```
+
+>[Before we can calculate Separation Over Expected (SOE), we need to determine the expected separation for each frame based on prior player movement and position. We train the model on data from weeks 1–15 and test it on the entire season to ensure it doesn't see future plays. We use lag-based spatial and motion features as inputs and treat actual separation as the target. These inputs are placed in a matrix, as required by our model. We set a fixed random seed to ensure reproducibility. For our computational model, we use XGBoost, a machine learning library that builds an ensemble of decision trees. XGBoost handles nonlinear relationships and feature interactions, and can handle outliers and noise, making it well-suited for predicting separation, which depends on player direction, acceleration, and location.]
+
+
+### Compute SOE 
+```{r}
+test_df$expected_separation = predict(model, test_matrix)
+
+test_df = test_df %>%
+  mutate(SOE = actual_separation - expected_separation)
+```
+
+>[Once the model predicts the expected separation, we subtract the expected separation from the observed value to obtain Separation Over Expected (SOE). A positive SOE indicates the receiver created more separation than a typical player would in that scenario; a negative SOE indicates the receiver was covered more closely than expected. SOE helps identify a receiver's skill or route quality beyond physical movement alone, making it a useful evaluation tool.]
+
+### Model Performance Metrics 
+```{r}
+library(Metrics)
+rmse_value = rmse(test_df$actual_separation, test_df$expected_separation)
+mae_value = mae(test_df$actual_separation, test_df$expected_separation)
+
+tibble(
+  RMSE = rmse_value,
+  MAE = mae_value
+)
+```
+
+>[To assess how accurately our model predicts expected separation, we compute two standard regression metrics: Root Mean Squared Error(RMSE) and Mean Absolute Error (MAE). RSME penalizes bigger prediction mistakes more severely, while MAE measures the average magnitude of error in predicted separation. Our results show an RSME of 0.199 and an MAE of 0.140. Considering that typical payer movement between frames occurs within a narrow spatial (often less than a yard), an average error of 0.14 yards is highly reasonable. This indicates that the XGBoost model effectively learns how receiver and defender motion patterns predict short-term separation, providing a reliable foundation for our SOE metric.]
+
+### Route type distribution of SOE - which routes generate more separation over expected
+```{r}
+test_df = test_df %>%
+  mutate(success = pass_result %in% c("C", "R"))
+
+route_summary = test_df %>%
+  group_by(route_of_targeted_receiver)%>%
+  summarize(
+    SOE = round(mean(SOE),3),
+    EPA = round(mean(expected_points_added),3),
+    Success_pct = round(mean(success)*100,2),
+    Total_plays = n()
+  )%>%
+  arrange(desc(SOE))
+
+tibble(route_summary)
+```
+
+>[After computing SOE at the frame level, we summarize them at the play level to understand how route concepts influence separation outcomes. To connect separation with on field success, we define a succesful play as either a completed pass ("C") or a receiver gaining yards after a scramble ("R"). Using this defintion, we group plays by the targeted receiver's route and compute four route levelmeasures: Average SOE, average EPA, success rate, and total number of plays run. The results reveal four behavioral patterns across route types. The first type is the ones with positive SOE and high EPA (e.g., OUT, POST, CROSS). This result reveals these routes consistently generate separation beyond expectation and translate that unexpected openness into strong on-field value. They show both physical separation and meaningful payoff. The second type is the ones with negative SOE and high success rates (e.g., HITCH, SLANT, FLAT). This result reveals that these routes succeed without producing additional separation. Their success likely relies on timing, spacing, and short throws rather than fighting defenders in space. The third type is the ones with Positive SOE and low success rate (e.g., GO). This result reveals that these types of routes often create unexpected separation, but they are high-risk. However, when they succeed, they produce very high EPA levels, indicating an all-or-nothing response. The last type is the ones with negative SOE and negative EPA (e.g., SCREEN, ANGLE). This result reveals that these routes provide little additional separation and yield low offensive value. Their performance depends less on receiver movement. Overall, SOE does not simply measure good plays. Instead, it quantifies the additional separation created beyond what defenders anticipate. Combining SOE, EPA, and success rates distinguished routes that win through athletic separation (POST, CROSS, OUT) and Routes that win through timing and design(HITCH, SLANT, SCREEN). This makes SOE a powerful tool for evaluating individual receiver performance independent of the scheme. It highlights when seapriton is created by the player, not by the player's design.]
+
+
+```{r}
+route_summary_for_ggplot = test_df %>%
+  group_by(route_of_targeted_receiver)%>%
+  summarize(
+    mean_SOE = mean(SOE),
+    meidan_SOE = median(SOE),
+    count = n()
+  ) %>% arrange(desc(mean_SOE))
+
+ggplot(route_summary_for_ggplot, aes(x = reorder(route_of_targeted_receiver, mean_SOE), y = mean_SOE,
+                                     fill = route_of_targeted_receiver))+
+  geom_col()+
+  geom_text(aes(label = round(mean_SOE, 3)), size = 3)+
+  coord_flip()+
+  labs(
+    title = "Average Separation Over Expected by Route Type",
+    x = "Route Type",
+    y = "Average SOE (yards)"
+  )
+  
+```
+
+>[We visualize the average SOE for each route concept to compare how route design influences unexpected openness. SOE captures how much more (or less) separation a receiver generated than would be predicted from movement patterns alone. Routes placed toward the top of the figure (e.g., Out, Post,Cross) yield positive SOE values, indicating they consistently create more separation than defensive movements would predict. These routes force defenders to turn or be overrun, creating unexpected openings. In contrast, routes such as Angle, Screen,Hitch, and SLANT show negative SOE, meaning they create less unexpected separation. Many of these routes rely on timing, or quick throws, rather than physical separation to succeed. Overall, this visualization highlights that high production does not always come from separation, and SOE helps isolate the contribution of receiver movement from the scheme. This allows us to evaluate route quality independent of lay design.]
+
+
+### Does Separation Covert into Successful play? 
+
+>[After developing SOE at the frame level, we evaluate whether additional separation actually translates into productive offensive results. The following two visualization tests question using pass outcomes and expected points added.]
+
+```{r}
+ggplot(test_df, aes(x = pass_result, y = SOE))+
+  geom_boxplot(fill = "blue")+
+  labs(
+    title = "SOE by Pass Result",
+    x = "Pass Outcome",
+    y = "Separation Over Expected"
+  )
+```
+
+>[This visualization compares SOE across different pass outcomes. Completed passes ("C") exhibit slightly higher SOE values on average, suggesting that unexpected separation does contribute to successful catches. However, incomplete ("I") and intercepted ("IN") passes still show similar median SOE values and large overlaps. This indicates that separation alone does not guarantee completion. Factors like quarterback accuracy, ball placement, and route timing can override the separation advantage. SOE helps identify how open a receiver became, but it doesn't capture execution quality after the throw.]
+
+
+```{r}
+ggplot(test_df, aes( x = SOE, y = expected_points_added))+
+  geom_point(color = "blue")+
+  geom_smooth(method = "lm", color = "black")+
+  labs(
+    title = "SOE vs Expected Points Added",
+    x = "Separation Over Expected",
+    y = "EPA"
+  )+theme_minimal()
+```
+
+>[We observe a positive relationship between SOE and EPA. Routes that generate unexpected separation tend to produce more valuable plays, captured by the upward trend in EPA as SOE increases. Although the correlation is modest, it still shows that connections in which receivers gain more separation than expected are more likely to result in receptions. ]
+
+>[Together, these results show that SOE is not a universal indicator of play success, but a measure of whether a receiver creates value through physical separation rather than scheme or timing. Completion probability and EPA improve as SEO increases, especially for longer developing routers where separation is a must. As a result, SOE is most valuable when used to isolate individual route functionality, rather than to judge total play quality.]
